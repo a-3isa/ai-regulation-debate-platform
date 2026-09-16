@@ -1,0 +1,104 @@
+# Live debate platform: Week 4 analytics, the Week 3 debate engine, and the UI.
+#
+#   cp .env.example .env    # fill in the keys
+#   docker compose up -d --build
+#
+# Routing assumes an existing Traefik with the Docker provider and an ACME
+# resolver (the labels are inert without it). Behind Traefik:
+#   https://$PUBLIC_HOST/          -> ui
+#   https://$PUBLIC_HOST/api/      -> debate service
+#   https://$PUBLIC_HOST/analytics/ -> Week 4 analytics service
+#
+# The analytics service is built from its own repository at a pinned ref, so
+# this repo never holds a second copy of Week 4's code.
+
+services:
+  analytics:
+    build:
+      context: ${ANALYTICS_REPO:-https://github.com/YaassminSalahEldin/Analytics-Intelligence-Layer.git#fix/week4-review-followups}
+    image: analytics-api:latest
+    restart: unless-stopped
+    environment:
+      ANALYTICS_CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:5173}
+      # The transformer backend needs ~2.5 GB of image and more RAM than a
+      # small VPS has spare; the lexicon fallback is deterministic and every
+      # result says which backend produced it.
+      SENTIMENT_BACKEND: ${SENTIMENT_BACKEND:-vader}
+    networks: [platform, edge]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-platform_edge}
+      traefik.http.routers.analytics.rule: Host(`${PUBLIC_HOST}`) && PathPrefix(`/analytics`)
+      traefik.http.routers.analytics.entrypoints: websecure
+      traefik.http.routers.analytics.tls.certresolver: ${CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.analytics.middlewares: analytics-strip
+      traefik.http.middlewares.analytics-strip.stripprefix.prefixes: /analytics
+      traefik.http.services.analytics.loadbalancer.server.port: "8000"
+
+  debate:
+    build:
+      context: .
+      dockerfile: services/debate/Dockerfile
+    image: debate-api:latest
+    restart: unless-stopped
+    depends_on: [analytics]
+    environment:
+      ANALYTICS_URL: http://analytics:8000
+      DEBATE_CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:5173}
+      DEBATE_OUTPUT_DIR: /data/discussions
+      DEBATE_MAX_ROUNDS: ${DEBATE_MAX_ROUNDS:-8}
+      DEBATE_MAX_CONCURRENT_RUNS: ${DEBATE_MAX_CONCURRENT_RUNS:-2}
+      # Week 2 LLM provider (agent turns). Without a key every turn falls back
+      # to a stub and the UI says so.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-meta-llama/llama-3.3-70b-instruct}
+      AGENT_LLM_STUB: ${AGENT_LLM_STUB:-0}
+      # Week 1 knowledge base (retrieval during the debate).
+      WEEK1_RETRIEVAL_URL: ${WEEK1_RETRIEVAL_URL:-https://ai-regulation-rag.vercel.app}
+      WEEK1_API_KEY: ${WEEK1_API_KEY:-}
+      RAG_TIMEOUT_SECONDS: ${RAG_TIMEOUT_SECONDS:-30}
+    volumes:
+      - discussions:/data/discussions
+      - agent_memory:/week3/src/vendor/data
+    networks: [platform, edge]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-platform_edge}
+      traefik.http.routers.debate.rule: Host(`${PUBLIC_HOST}`) && PathPrefix(`/api`)
+      traefik.http.routers.debate.entrypoints: websecure
+      traefik.http.routers.debate.tls.certresolver: ${CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.debate.middlewares: debate-strip
+      traefik.http.middlewares.debate-strip.stripprefix.prefixes: /api
+      traefik.http.services.debate.loadbalancer.server.port: "8100"
+      # SSE: never buffer, and allow a long-lived response while agents think.
+      traefik.http.services.debate.loadbalancer.responseforwarding.flushinterval: 100ms
+
+  ui:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Baked in at build time by Vite, so rebuild the image if this changes.
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8100}
+    image: debate-ui:latest
+    restart: unless-stopped
+    depends_on: [debate]
+    networks: [edge]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-platform_edge}
+      traefik.http.routers.ui.rule: Host(`${PUBLIC_HOST}`)
+      traefik.http.routers.ui.entrypoints: websecure
+      traefik.http.routers.ui.tls.certresolver: ${CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.ui.priority: "1"   # lowest: /api and /analytics win
+      traefik.http.services.ui.loadbalancer.server.port: "80"
+
+volumes:
+  discussions:
+  agent_memory:
+
+networks:
+  platform:
+    driver: bridge
+  edge:
+    driver: bridge

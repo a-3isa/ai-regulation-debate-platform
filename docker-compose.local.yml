@@ -1,0 +1,31 @@
+# Local development overlay: publish ports directly, no Traefik, no TLS.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+#   UI         http://localhost:5173
+#   debate API http://localhost:8100
+#   analytics  http://localhost:8000
+
+services:
+  analytics:
+    ports:
+      - "8000:8000"
+    labels:
+      traefik.enable: "false"
+
+  debate:
+    ports:
+      - "8100:8100"
+    environment:
+      DEBATE_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    labels:
+      traefik.enable: "false"
+
+  ui:
+    build:
+      args:
+        VITE_API_BASE: http://localhost:8100
+    ports:
+      - "5173:80"
+    labels:
+      traefik.enable: "false"
