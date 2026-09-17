@@ -34,8 +34,13 @@ COPY services/debate/app ./app
 
 # Agent memory is written under /week3/src/vendor/data, and finished runs under
 # /data/discussions; both must be writable by the non-root user.
+# /data/runs holds every debate's event log (restored after a restart), and
+# /week3/personas-defaults is an untouched copy of the shipped members that
+# "Restore originals" copies back. The persona directory itself is a volume in
+# production, so members edited in the UI survive a redeploy.
 RUN useradd --create-home --uid 10002 debate \
-    && mkdir -p /data/discussions /week3/src/vendor/data /week3/outputs/logs \
+    && mkdir -p /data/discussions /data/runs /week3/src/vendor/data /week3/outputs/logs \
+    && cp -r /week3/src/vendor/week2/personas /week3/personas-defaults \
     && chown -R debate:debate /app /data /week3
 USER debate
 

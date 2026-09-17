@@ -3,11 +3,22 @@
 //
 // The stream replays from event 0, so remounting this hook (navigating between
 // pages) re-renders the whole debate rather than losing what came before.
+//
+// TELLING A SLOW MODEL FROM A DEAD RUN
+// A turn can legitimately take a minute or more while the model thinks, and
+// the browser's EventSource retries silently when a connection drops. Without a
+// check, a run that died server-side looks identical to a slow one: the page
+// sits on "is speaking" forever. So whenever the connection errors, and
+// whenever nothing has arrived for a while, the hook asks the server what the
+// run's status really is - and says so on screen.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { cancelRun, fetchCharts, openStream, startRun } from './api.js';
+import { ApiError, cancelRun, fetchCharts, fetchRun, openStream, startRun } from './api.js';
 
-export const TERMINAL = new Set(['completed', 'converged', 'failed', 'cancelled']);
+export const TERMINAL = new Set(['completed', 'converged', 'failed', 'cancelled', 'interrupted', 'lost']);
+
+//: How long without any event before the hook checks on the run.
+const QUIET_CHECK_MS = 90_000;
 
 const EVENT_TYPES = [
   'run_started',
@@ -41,6 +52,7 @@ export const emptyRun = {
   error: null,
   currentRound: 0,
   speaking: null,
+  slow: false,
 };
 
 export function useDebateRun() {
@@ -48,53 +60,89 @@ export function useDebateRun() {
   const [charts, setCharts] = useState(null);
   const [starting, setStarting] = useState(false);
   const streamRef = useRef(null);
+  const lastEventAt = useRef(Date.now());
 
   const running = run.status === 'running' || run.status === 'pending';
 
   const handleEvent = useCallback((type, event) => {
+    lastEventAt.current = Date.now();
     const data = event.data || {};
     setRun((prev) => {
+      const base = prev.slow ? { ...prev, slow: false } : prev;
       switch (type) {
         case 'run_started':
-          return { ...prev, status: 'running', meta: data, personas: data.personas || {} };
+          return { ...base, status: 'running', meta: data, personas: data.personas || {} };
         case 'round_started':
-          return { ...prev, currentRound: data.round, speaking: null };
+          return { ...base, currentRound: data.round, speaking: null };
         case 'turn_started':
-          return { ...prev, speaking: data.persona_id, currentRound: data.round };
+          return { ...base, speaking: data.persona_id, currentRound: data.round };
         case 'message':
-          return { ...prev, messages: [...prev.messages, data], speaking: null };
+          return { ...base, messages: [...base.messages, data], speaking: null };
         case 'retrieval':
-          return { ...prev, retrievals: [...prev.retrievals, data] };
+          return { ...base, retrievals: [...base.retrievals, data] };
         case 'opinion': {
-          const history = prev.opinions[data.persona_id] || [];
-          return {
-            ...prev,
-            opinions: { ...prev.opinions, [data.persona_id]: [...history, data] },
-          };
+          const history = base.opinions[data.persona_id] || [];
+          return { ...base, opinions: { ...base.opinions, [data.persona_id]: [...history, data] } };
         }
         case 'round_complete':
-          return { ...prev, rounds: [...prev.rounds, data] };
+          return { ...base, rounds: [...base.rounds, data] };
         case 'analytics':
-          return { ...prev, analytics: data.analytics };
+          return { ...base, analytics: data.analytics };
         case 'analytics_unavailable':
           return {
-            ...prev,
-            notices: [...prev.notices, `Round ${data.round}: analytics unavailable (${data.reason})`],
+            ...base,
+            notices: [...base.notices, `Round ${data.round}: analytics unavailable (${data.reason})`],
           };
         case 'report':
-          return { ...prev, report: data.markdown, analytics: data.analytics || prev.analytics };
+          return { ...base, report: data.markdown, analytics: data.analytics || base.analytics };
         case 'notice':
-          return { ...prev, notices: [...prev.notices, data.message] };
+          return { ...base, notices: [...base.notices, data.message] };
         case 'run_complete':
-          return { ...prev, status: data.status || 'completed', speaking: null };
+          return { ...base, status: data.status || 'completed', speaking: null };
         case 'run_failed':
-          return { ...prev, status: 'failed', error: data.error, speaking: null };
+          return { ...base, status: data.status || 'failed', error: data.error, speaking: null };
         case 'stream_end':
-          return { ...prev, status: data.status || prev.status, speaking: null };
+          return {
+            ...base,
+            status: TERMINAL.has(base.status) ? base.status : data.status || base.status,
+            speaking: null,
+          };
         default:
-          return prev;
+          return base;
       }
     });
+  }, []);
+
+  // Ask the server what really happened to the run.
+  const checkRun = useCallback(async (runId) => {
+    try {
+      const summary = await fetchRun(runId);
+      if (TERMINAL.has(summary.status)) {
+        setRun((prev) => ({
+          ...prev,
+          status: summary.status,
+          error: summary.error || prev.error,
+          speaking: null,
+          slow: false,
+        }));
+      } else {
+        // Alive, just slow: say so instead of looking frozen.
+        setRun((prev) => (prev.status === 'running' ? { ...prev, slow: true } : prev));
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        setRun((prev) => ({
+          ...prev,
+          status: 'lost',
+          speaking: null,
+          slow: false,
+          error:
+            'This debate is no longer on the server - most likely the service restarted and the ' +
+            'session was lost. What was said so far is shown below; start a new debate to continue.',
+        }));
+      }
+      // Any other failure is probably our own connection; EventSource keeps retrying.
+    }
   }, []);
 
   useEffect(() => {
@@ -102,6 +150,7 @@ export function useDebateRun() {
 
     const source = openStream(run.runId);
     streamRef.current = source;
+    lastEventAt.current = Date.now();
 
     const listeners = EVENT_TYPES.map((type) => {
       const handler = (event) => handleEvent(type, JSON.parse(event.data));
@@ -109,12 +158,22 @@ export function useDebateRun() {
       return [type, handler];
     });
 
+    source.onerror = () => checkRun(run.runId);
+
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastEventAt.current > QUIET_CHECK_MS) {
+        lastEventAt.current = Date.now(); // one check per quiet period
+        checkRun(run.runId);
+      }
+    }, 15_000);
+
     return () => {
+      clearInterval(watchdog);
       listeners.forEach(([type, handler]) => source.removeEventListener(type, handler));
       source.close();
       streamRef.current = null;
     };
-  }, [run.runId, handleEvent]);
+  }, [run.runId, handleEvent, checkRun]);
 
   // Close the stream and pull the final charts once the debate ends.
   useEffect(() => {
@@ -123,19 +182,19 @@ export function useDebateRun() {
       streamRef.current.close();
       streamRef.current = null;
     }
-    if (run.status === 'failed' || charts) return;
+    if (!['completed', 'converged', 'cancelled'].includes(run.status) || charts) return;
     fetchCharts(run.runId)
       .then(setCharts)
       .catch(() => setCharts(null));
   }, [run.status, run.runId, charts]);
 
-  const start = useCallback(async ({ topic, numRounds, strategy }) => {
+  const start = useCallback(async ({ topic, numRounds, strategy, agents }) => {
     if (!topic.trim()) return;
     setStarting(true);
     setCharts(null);
     setRun({ ...emptyRun, status: 'pending' });
     try {
-      const response = await startRun({ topic: topic.trim(), numRounds, strategy });
+      const response = await startRun({ topic: topic.trim(), numRounds, strategy, agents });
       setRun((prev) => ({ ...prev, runId: response.run_id, status: 'running' }));
     } catch (error) {
       setRun({ ...emptyRun, status: 'failed', error: error.message });

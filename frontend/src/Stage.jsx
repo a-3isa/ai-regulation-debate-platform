@@ -93,8 +93,8 @@ export function ChamberRing({ agents, personas, graph, speaking, lastMessage, st
       role="img"
       aria-label={
         activeFrom
-          ? `${displayName(personas, activeFrom)} is addressing ${displayName(personas, activeTo)}`
-          : 'The council seating and who addresses whom'
+          ? `${displayName(personas, activeFrom)} is talking to ${displayName(personas, activeTo)}`
+          : 'Who is talking to whom'
       }
     >
       <defs>
@@ -205,7 +205,7 @@ export function MemberCard({ personaId, persona, personas, index, stance, delta,
 
       {speaking && (
         <p className="member-speaking">
-          <Loader2 size={12} className="spin" aria-hidden="true" /> holding the floor
+          <Loader2 size={12} className="spin" aria-hidden="true" /> speaking
         </p>
       )}
     </article>
@@ -261,7 +261,7 @@ export function Floor({ run, agents, personas }) {
     <div className="floor" aria-live="polite">
       {run.messages.length === 0 && !run.speaking && (
         <p className="muted empty">
-          The council is consulting the record and preparing opening positions…
+          Members are reading the evidence and forming their opening positions…
         </p>
       )}
 
@@ -273,7 +273,7 @@ export function Floor({ run, agents, personas }) {
               <span>Round {round}</span>
               {lookups > 0 && (
                 <span className="round-evidence">
-                  <Search size={11} aria-hidden="true" /> {lookups} source{lookups === 1 ? '' : 's'} consulted
+                  <Search size={11} aria-hidden="true" /> {lookups} evidence lookup{lookups === 1 ? '' : 's'}
                 </span>
               )}
             </h3>
@@ -288,11 +288,11 @@ export function Floor({ run, agents, personas }) {
                     <header>
                       <strong style={{ color }}>{displayName(personas, message.sender)}</strong>
                       <span className="muted small">
-                        addressing {message.recipients.map((r) => displayName(personas, r)).join(', ')}
+                        to {message.recipients.map((r) => displayName(personas, r)).join(', ')}
                       </span>
                       {message.used_retrieval && (
                         <span className="tag">
-                          <Quote size={10} aria-hidden="true" /> cited the record
+                          <Quote size={10} aria-hidden="true" /> used evidence
                         </span>
                       )}
                     </header>
@@ -316,7 +316,7 @@ export function Floor({ run, agents, personas }) {
           <div className="speech-body">
             <header>
               <strong>{displayName(personas, run.speaking)}</strong>
-              <span className="muted small">has the floor</span>
+              <span className="muted small">is writing a reply</span>
             </header>
             <span className="dots" aria-label="composing a reply">
               <i />

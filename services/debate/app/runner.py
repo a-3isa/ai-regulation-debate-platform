@@ -159,6 +159,8 @@ class RunConfig:
     strategy: str = "ring"
     proposition: Optional[str] = None
     stop_on_convergence: bool = True
+    #: Which members take part. None means every member currently on file.
+    agents: Optional[list[str]] = None
 
     def validated(self) -> "RunConfig":
         topic = (self.topic or "").strip()
@@ -171,12 +173,19 @@ class RunConfig:
         # Week 3 requires at least 3 rounds (its README section 10), and the
         # ceiling keeps one request from spending unbounded LLM credit.
         rounds = max(MIN_ROUNDS, min(MAX_ROUNDS, int(self.num_rounds)))
+        agents = None
+        if self.agents:
+            # Keep the caller's order, drop duplicates.
+            agents = list(dict.fromkeys(a.strip() for a in self.agents if a and a.strip()))
+            if len(agents) < 2:
+                raise ValueError("a debate needs at least 2 members")
         return RunConfig(
             topic=topic,
             num_rounds=rounds,
             strategy=self.strategy,
             proposition=(self.proposition or "").strip() or None,
             stop_on_convergence=self.stop_on_convergence,
+            agents=agents,
         )
 
 
@@ -360,7 +369,23 @@ def run_debate(
     Returns the final discussion state.
     """
     cfg = cfg.validated()
-    graph = graph_config(None, strategy=cfg.strategy)
+
+    # Always pass the member list explicitly. Week 3's graph_config(None) falls
+    # back to DEFAULT_AGENTS, which is computed once at import - so a member
+    # added through the persona API would silently never take part until the
+    # service restarted.
+    on_file = load_personas()
+    if cfg.agents:
+        unknown = [a for a in cfg.agents if a not in on_file]
+        if unknown:
+            raise ValueError(f"unknown member(s) {unknown}; available: {sorted(on_file)}")
+        chosen = cfg.agents
+    else:
+        chosen = list(on_file)
+    if len(chosen) < 2:
+        raise ValueError("a debate needs at least 2 members on file")
+
+    graph = graph_config(chosen, strategy=cfg.strategy)
     if not graph["strongly_connected"]:
         raise ValueError(f"agent graph is not strongly connected: {graph['adjacency']}")
 

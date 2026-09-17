@@ -77,6 +77,8 @@ services:
       ANALYTICS_URL: http://analytics:8000
       DEBATE_CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:5173}
       DEBATE_OUTPUT_DIR: /data/discussions
+      DEBATE_RUNS_DIR: /data/runs
+      PERSONA_DEFAULTS_DIR: /week3/personas-defaults
       DEBATE_MAX_ROUNDS: ${DEBATE_MAX_ROUNDS:-8}
       DEBATE_MAX_CONCURRENT_RUNS: ${DEBATE_MAX_CONCURRENT_RUNS:-2}
       # Week 2 LLM provider (agent turns). Without a key every turn falls back
@@ -91,6 +93,12 @@ services:
     volumes:
       - discussions:/data/discussions
       - agent_memory:/week3/src/vendor/data
+      # Every debate's event log, so a restart shows an interrupted debate
+      # instead of erasing it.
+      - runs:/data/runs
+      # Members added or edited in the UI. A new named volume is seeded from
+      # the image on first mount, so it starts with the shipped four.
+      - personas:/week3/src/vendor/week2/personas
     networks: [platform, edge]
     labels:
       traefik.enable: "true"
@@ -127,6 +135,8 @@ services:
 volumes:
   discussions:
   agent_memory:
+  runs:
+  personas:
 
 networks:
   platform:

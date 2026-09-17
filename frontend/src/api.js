@@ -3,38 +3,70 @@
 // service running locally.
 export const API_BASE = (import.meta.env.VITE_API_BASE || 'http://localhost:8100').replace(/\/$/, '');
 
+// An error that keeps the server's structured detail, so forms can show each
+// field's validation message next to that field.
+export class ApiError extends Error {
+  constructor(status, detail) {
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : detail?.errors
+          ? detail.errors.map((e) => e.message).join(' ')
+          : `${status} error`;
+    super(message);
+    this.status = status;
+    this.detail = detail;
+    this.fieldErrors = Array.isArray(detail?.errors) ? detail.errors : [];
+  }
+}
+
 async function asJson(response) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
       const body = await response.json();
-      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      if (body?.detail !== undefined) detail = body.detail;
     } catch {
       /* keep the status line */
     }
-    throw new Error(detail);
+    throw new ApiError(response.status, detail);
   }
   return response.json();
 }
 
-export function startRun({ topic, numRounds, strategy }) {
-  return fetch(`${API_BASE}/runs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, num_rounds: numRounds, strategy }),
+function send(method, path, body) {
+  return fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
   }).then(asJson);
 }
 
+// --- debates ---------------------------------------------------------------
+
+export function startRun({ topic, numRounds, strategy, agents }) {
+  return send('POST', '/runs', {
+    topic,
+    num_rounds: numRounds,
+    strategy,
+    agents: agents?.length ? agents : undefined,
+  });
+}
+
 export function cancelRun(runId) {
-  return fetch(`${API_BASE}/runs/${runId}`, { method: 'DELETE' }).then(asJson);
+  return send('DELETE', `/runs/${runId}`);
+}
+
+export function fetchRun(runId) {
+  return send('GET', `/runs/${runId}`);
 }
 
 export function fetchCharts(runId) {
-  return fetch(`${API_BASE}/runs/${runId}/charts`).then(asJson);
+  return send('GET', `/runs/${runId}/charts`);
 }
 
 export function fetchHealth() {
-  return fetch(`${API_BASE}/health`).then(asJson);
+  return send('GET', '/health');
 }
 
 export function discussionUrl(runId) {
@@ -47,19 +79,11 @@ export function openStream(runId) {
   return new EventSource(`${API_BASE}/runs/${runId}/stream`);
 }
 
-export const STREAM_EVENTS = [
-  'run_started',
-  'round_started',
-  'turn_started',
-  'message',
-  'retrieval',
-  'opinion',
-  'round_complete',
-  'analytics',
-  'analytics_unavailable',
-  'report',
-  'notice',
-  'run_complete',
-  'run_failed',
-  'stream_end',
-];
+// --- members (personas) ----------------------------------------------------
+
+export const listPersonas = () => send('GET', '/personas').then((b) => b.personas);
+export const fetchVocabulary = () => send('GET', '/personas/vocabulary');
+export const createPersona = (persona) => send('POST', '/personas', persona);
+export const updatePersona = (id, persona) => send('PUT', `/personas/${id}`, persona);
+export const deletePersona = (id) => send('DELETE', `/personas/${id}`);
+export const resetPersonas = () => send('POST', '/personas/reset').then((b) => b.personas);

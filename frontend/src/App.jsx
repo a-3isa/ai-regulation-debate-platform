@@ -1,36 +1,42 @@
-// Shell: the masthead, the motion (topic) form, the nav, and hash routing.
+// Shell: header, topic form, navigation, and hash routing.
 //
 // Routing is hash-based on purpose - the UI is served as static files behind
 // Traefik, and a hash route needs no server-side rewrite rules to survive a
 // refresh or a shared link.
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   BarChart3,
+  FileText,
   Gavel,
+  History,
   Info,
   Loader2,
+  MessageSquare,
   Play,
-  ScrollText,
   Square,
   Users,
 } from 'lucide-react';
 
+import { agentColor } from './Analytics.jsx';
+import { listPersonas } from './api.js';
+import { MembersPage } from './Members.jsx';
 import { AboutPage, AnalyticsPage, ArchivePage, ChamberPage, RecordPage } from './Pages.jsx';
 import { TERMINAL, useDebateRun } from './useDebateRun.js';
 
 const PAGES = [
-  { id: 'chamber', label: 'Chamber', icon: Gavel },
-  { id: 'analysis', label: 'Analysis', icon: BarChart3 },
-  { id: 'record', label: 'Record', icon: ScrollText },
-  { id: 'archive', label: 'Archive', icon: Users },
+  { id: 'debate', label: 'Debate', icon: MessageSquare },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'report', label: 'Report', icon: FileText },
+  { id: 'members', label: 'Members', icon: Users },
+  { id: 'history', label: 'History', icon: History },
   { id: 'about', label: 'About', icon: Info },
 ];
 
 function currentPage() {
   const id = window.location.hash.replace(/^#\/?/, '');
-  return PAGES.some((p) => p.id === id) ? id : 'chamber';
+  return PAGES.some((p) => p.id === id) ? id : 'debate';
 }
 
 export default function App() {
@@ -39,39 +45,61 @@ export default function App() {
   const [topic, setTopic] = useState('');
   const [numRounds, setNumRounds] = useState(4);
   const [strategy, setStrategy] = useState('ring');
+  const [members, setMembers] = useState([]);
+  const [seated, setSeated] = useState(null); // null = everyone
 
-  useEffect(() => {
-    const onHashChange = () => setPage(currentPage());
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+  const loadMembers = useCallback(() => {
+    listPersonas()
+      .then((list) => {
+        setMembers(list);
+        // Drop any selected member that no longer exists.
+        setSeated((prev) => (prev ? prev.filter((id) => list.some((m) => m.id === id)) : prev));
+      })
+      .catch(() => {});
   }, []);
 
-  // Send the viewer to the record as soon as a debate closes: that is what
-  // they are waiting for, and it is two clicks away otherwise.
   useEffect(() => {
-    if (TERMINAL.has(run.status) && run.status !== 'failed' && page === 'chamber' && run.report) {
-      // Announce rather than hijack - a link, not a redirect.
-      setPage('chamber');
-    }
-  }, [run.status, run.report, page]);
+    loadMembers();
+  }, [loadMembers]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = currentPage();
+      setPage(next);
+      if (next === 'debate') loadMembers();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [loadMembers]);
 
   function go(id) {
     window.location.hash = `#/${id}`;
     setPage(id);
+    if (id === 'debate') loadMembers();
+  }
+
+  const chosen = seated ?? members.map((m) => m.id);
+  const tooFew = members.length > 0 && chosen.length < 2;
+
+  function toggleMember(id) {
+    const base = seated ?? members.map((m) => m.id);
+    setSeated(base.includes(id) ? base.filter((x) => x !== id) : [...base, id]);
   }
 
   function onSubmit(event) {
     event.preventDefault();
-    start({ topic, numRounds, strategy });
-    go('chamber');
+    if (tooFew) return;
+    start({ topic, numRounds, strategy, agents: seated ? chosen : undefined });
+    go('debate');
   }
 
-  function openArchived(runId) {
+  function openPast(runId) {
     attach(runId);
-    go('chamber');
+    go('debate');
   }
 
   const roundsSeen = run.meta?.num_rounds ?? numRounds;
+  const showForm = page === 'debate';
 
   return (
     <div className="app">
@@ -82,7 +110,7 @@ export default function App() {
           <Gavel size={22} aria-hidden="true" />
           <div>
             <h1>The AI Regulation Council</h1>
-            <p className="muted small">A standing chamber on artificial-intelligence policy</p>
+            <p className="muted small">AI personas debating AI policy, with live analysis</p>
           </div>
         </div>
 
@@ -104,78 +132,117 @@ export default function App() {
         </nav>
       </header>
 
-      <form className="motion-form" onSubmit={onSubmit}>
-        <label className="grow">
-          <span>Motion before the council</span>
-          <input
-            type="text"
-            value={topic}
-            maxLength={300}
-            placeholder="e.g. open-source foundation models should be exempt from high-risk obligations"
-            onChange={(event) => setTopic(event.target.value)}
-            disabled={running}
-          />
-        </label>
-        <label>
-          <span>Rounds</span>
-          <input
-            type="number"
-            min={3}
-            max={8}
-            value={numRounds}
-            onChange={(event) => setNumRounds(Number(event.target.value))}
-            disabled={running}
-          />
-        </label>
-        <label>
-          <span>Seating</span>
-          <select value={strategy} onChange={(event) => setStrategy(event.target.value)} disabled={running}>
-            <option value="ring">Ring — each hears one</option>
-            <option value="mesh">Mesh — each hears all</option>
-          </select>
-        </label>
-        {running ? (
-          <button type="button" className="danger" onClick={stop}>
-            <Square size={15} aria-hidden="true" /> Adjourn
-          </button>
-        ) : (
-          <button type="submit" disabled={!topic.trim() || starting}>
-            {starting ? <Loader2 size={15} className="spin" aria-hidden="true" /> : <Play size={15} aria-hidden="true" />}
-            {starting ? 'Convening…' : 'Open the session'}
-          </button>
-        )}
-      </form>
+      {showForm && (
+        <form className="motion-form" onSubmit={onSubmit}>
+          <label className="grow">
+            <span>Debate topic</span>
+            <input
+              type="text"
+              value={topic}
+              maxLength={300}
+              placeholder="e.g. open-source AI models should be exempt from high-risk rules"
+              onChange={(event) => setTopic(event.target.value)}
+              disabled={running}
+            />
+          </label>
+          <label>
+            <span>Rounds</span>
+            <input
+              type="number"
+              min={3}
+              max={8}
+              value={numRounds}
+              onChange={(event) => setNumRounds(Number(event.target.value))}
+              disabled={running}
+            />
+          </label>
+          <label>
+            <span>Who hears whom</span>
+            <select value={strategy} onChange={(event) => setStrategy(event.target.value)} disabled={running}>
+              <option value="ring">Each hears one other (ring)</option>
+              <option value="mesh">Everyone hears everyone</option>
+            </select>
+          </label>
+          {running ? (
+            <button type="button" className="danger" onClick={stop}>
+              <Square size={15} aria-hidden="true" /> Stop debate
+            </button>
+          ) : (
+            <button type="submit" disabled={!topic.trim() || starting || tooFew}>
+              {starting ? <Loader2 size={15} className="spin" aria-hidden="true" /> : <Play size={15} aria-hidden="true" />}
+              {starting ? 'Starting…' : 'Start debate'}
+            </button>
+          )}
 
-      {run.runId && (
-        <section className="status-strip" aria-label="Session status">
-          <StatusCard icon={<Activity size={14} />} label="Session" value={statusLabel(run.status)} />
+          {members.length > 0 && (
+            <fieldset className="seat-picker" disabled={running}>
+              <legend>
+                Taking part ({chosen.length} of {members.length})
+              </legend>
+              <div className="chips">
+                {members.map((member, index) => {
+                  const on = chosen.includes(member.id);
+                  return (
+                    <button
+                      key={member.id}
+                      type="button"
+                      className={on ? 'chip-toggle on' : 'chip-toggle'}
+                      style={on ? { borderColor: agentColor(index), color: agentColor(index) } : undefined}
+                      aria-pressed={on}
+                      onClick={() => toggleMember(member.id)}
+                    >
+                      {member.name}
+                    </button>
+                  );
+                })}
+                <button type="button" className="link-button" onClick={() => go('members')}>
+                  Manage members
+                </button>
+              </div>
+              {tooFew && <p className="field-hint error-text">Pick at least two members.</p>}
+            </fieldset>
+          )}
+        </form>
+      )}
+
+      {run.runId && showForm && (
+        <section className="status-strip" aria-label="Debate status">
+          <StatusCard icon={<Activity size={14} />} label="Status" value={statusLabel(run.status)} />
           <StatusCard
             icon={<Gavel size={14} />}
             label="Round"
             value={`${Math.min(run.currentRound, roundsSeen)} of ${roundsSeen}`}
           />
-          <StatusCard icon={<ScrollText size={14} />} label="Speeches" value={String(run.messages.length)} />
-          <StatusCard icon={<BarChart3 size={14} />} label="Sources cited" value={String(run.retrievals.length)} />
+          <StatusCard icon={<MessageSquare size={14} />} label="Messages" value={String(run.messages.length)} />
+          <StatusCard icon={<BarChart3 size={14} />} label="Evidence lookups" value={String(run.retrievals.length)} />
         </section>
+      )}
+
+      {run.slow && running && (
+        <p className="banner warn" role="status">
+          <Loader2 size={15} className="spin" aria-hidden="true" /> Still working - the model is taking
+          longer than usual on this turn. The debate is running on the server.
+        </p>
       )}
 
       {run.meta?.llm_stubbed && (
         <p className="banner warn" role="status">
-          The language model is stubbed — members are returning placeholder text, not real argument.
+          The AI model is switched off - members are returning placeholder text, not real arguments.
         </p>
       )}
 
       {run.error && (
-        <p className="banner error" role="alert">
+        <p className={run.status === 'interrupted' || run.status === 'lost' ? 'banner warn' : 'banner error'} role="alert">
           {run.error}
         </p>
       )}
 
       <main id="main">
-        {page === 'chamber' && <ChamberPage run={run} />}
-        {page === 'analysis' && <AnalyticsPage run={run} />}
-        {page === 'record' && <RecordPage run={run} charts={charts} />}
-        {page === 'archive' && <ArchivePage onOpen={openArchived} currentRunId={run.runId} />}
+        {page === 'debate' && <ChamberPage run={run} members={members} />}
+        {page === 'analytics' && <AnalyticsPage run={run} />}
+        {page === 'report' && <RecordPage run={run} charts={charts} />}
+        {page === 'members' && <MembersPage debating={running} />}
+        {page === 'history' && <ArchivePage onOpen={openPast} currentRunId={run.runId} />}
         {page === 'about' && <AboutPage />}
       </main>
 
@@ -199,9 +266,26 @@ function StatusCard({ icon, label, value }) {
 }
 
 function statusLabel(status) {
-  if (status === 'converged') return 'closed early';
-  if (status === 'running') return 'in session';
-  if (status === 'pending') return 'convening';
-  if (status === 'idle') return 'not sitting';
-  return status;
+  switch (status) {
+    case 'running':
+      return 'Debating';
+    case 'pending':
+      return 'Starting';
+    case 'converged':
+      return 'Finished early';
+    case 'completed':
+      return 'Finished';
+    case 'cancelled':
+      return 'Stopped';
+    case 'interrupted':
+      return 'Interrupted';
+    case 'lost':
+      return 'Lost';
+    case 'failed':
+      return 'Failed';
+    case 'idle':
+      return 'Not started';
+    default:
+      return TERMINAL.has(status) ? status : status;
+  }
 }

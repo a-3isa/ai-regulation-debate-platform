@@ -72,11 +72,31 @@ else
   echo "      Use docker-compose.local.yml to publish ports directly instead."
 fi
 
-# --- 4. build and start --------------------------------------------------
+# --- 4. never kill a debate in progress -----------------------------------
+# Recreating the debate container ends any debate it is running. Runs are
+# restored as "interrupted" afterwards, but the debate itself cannot resume, so
+# wait for the service to be idle unless FORCE=1.
+if docker compose ps --status running --services 2>/dev/null | grep -qx debate; then
+  for attempt in $(seq 1 60); do
+    active="$(docker compose exec -T debate python -c "
+import json, urllib.request
+print(json.load(urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5)).get('active_runs', 0))
+" 2>/dev/null || echo 0)"
+    [ "${active:-0}" = "0" ] && break
+    if [ "${FORCE:-0}" = "1" ]; then
+      echo "WARNING: $active debate(s) running - FORCE=1 set, deploying anyway."
+      break
+    fi
+    [ "$attempt" = "1" ] && say "$active debate(s) in progress - waiting for them to finish (FORCE=1 to skip)"
+    sleep 15
+  done
+fi
+
+# --- 5. build and start --------------------------------------------------
 say "Building and starting"
 COMPOSE_PROFILES="${COMPOSE_PROFILES:-}" docker compose up -d --build
 
-# --- 5. verify -----------------------------------------------------------
+# --- 6. verify -----------------------------------------------------------
 say "Waiting for the services to report healthy"
 for _ in $(seq 1 30); do
   if docker compose exec -T debate python -c "

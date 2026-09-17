@@ -37,6 +37,7 @@ import json
 import os
 import threading
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -47,6 +48,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.runner import MAX_ROUNDS, RunConfig, run_debate
+from app.personas import build_router as build_persona_router
 
 try:  # Week 3's own JSON conversion, so a record from this service and one
     # from its CLI are byte-identical in shape.
@@ -66,6 +68,13 @@ except Exception:  # pragma: no cover - fallback if Week 3 renames it
 
 ANALYTICS_URL = os.environ.get("ANALYTICS_URL", "http://analytics:8000").rstrip("/")
 MAX_CONCURRENT_RUNS = int(os.environ.get("DEBATE_MAX_CONCURRENT_RUNS", "2"))
+
+#: Where every run's events and final state are written, so a restart of this
+#: service does not silently erase debates. Must be a mounted volume.
+RUNS_DIR = Path(os.environ.get("DEBATE_RUNS_DIR", "/data/runs"))
+
+#: Statuses after which a run will never change again.
+TERMINAL_STATUSES = ("completed", "converged", "failed", "cancelled", "interrupted")
 _DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
 app = FastAPI(title="AI Regulation Debate Platform", version="1.0.0")
@@ -78,7 +87,7 @@ app.add_middleware(
         if o.strip()
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -113,6 +122,13 @@ class Run:
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.finished_at: Optional[str] = None
 
+    #: Event types after which the run is written to disk. Every message is
+    #: included: a debate interrupted mid-round should still show what was said.
+    PERSIST_ON = frozenset(
+        {"run_started", "message", "opinion", "round_complete", "analytics",
+         "report", "run_complete", "run_failed"}
+    )
+
     def append(self, event_type: str, payload: dict) -> None:
         with self.lock:
             self.events.append(
@@ -123,6 +139,75 @@ class Run:
                     "data": payload,
                 }
             )
+        if event_type in self.PERSIST_ON:
+            self.save()
+
+    # --- persistence ---------------------------------------------------------
+    #
+    # WHY THIS EXISTS
+    # Runs used to live only in this process's memory. Recreating the container
+    # during a deploy therefore killed any debate in progress AND erased it: the
+    # browser kept retrying a stream for a run that no longer existed and sat on
+    # "has the floor" indefinitely. A worker thread cannot survive a process
+    # restart, but the record can - so every meaningful event writes the run to
+    # disk, and startup restores it, marking an unfinished one `interrupted`
+    # rather than letting it disappear.
+
+    def to_record(self) -> dict:
+        with self.lock:
+            events = list(self.events)
+        return {
+            "run_id": self.run_id,
+            "config": {
+                "topic": self.config.topic,
+                "num_rounds": self.config.num_rounds,
+                "strategy": self.config.strategy,
+                "proposition": self.config.proposition,
+                "stop_on_convergence": self.config.stop_on_convergence,
+            },
+            "status": self.status,
+            "error": self.error,
+            "discussion_id": self.discussion_id,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "analytics": self.analytics,
+            "state": self.state,
+            "events": events,
+        }
+
+    def save(self) -> None:
+        """Write the run atomically. A failed write never harms the debate."""
+        try:
+            RUNS_DIR.mkdir(parents=True, exist_ok=True)
+            target = RUNS_DIR / f"{self.run_id}.json"
+            temp = target.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(self.to_record()), encoding="utf-8")
+            os.replace(temp, target)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: run {self.run_id} not persisted: {exc}")
+
+    @classmethod
+    def from_record(cls, record: dict) -> "Run":
+        cfg = record.get("config") or {}
+        run = cls(
+            record["run_id"],
+            RunConfig(
+                topic=cfg.get("topic", ""),
+                num_rounds=cfg.get("num_rounds", 3),
+                strategy=cfg.get("strategy", "ring"),
+                proposition=cfg.get("proposition"),
+                stop_on_convergence=cfg.get("stop_on_convergence", True),
+            ),
+        )
+        run.status = record.get("status", "interrupted")
+        run.error = record.get("error")
+        run.discussion_id = record.get("discussion_id")
+        run.started_at = record.get("started_at") or run.started_at
+        run.finished_at = record.get("finished_at")
+        run.analytics = record.get("analytics")
+        run.state = record.get("state") or {}
+        run.events = record.get("events") or []
+        return run
 
     def events_after(self, seq: int) -> list[dict]:
         with self.lock:
@@ -146,8 +231,47 @@ class Run:
 RUNS: dict[str, Run] = {}
 
 
+def _restore_runs() -> None:
+    """Load every persisted run. One that was still going when the process
+    stopped is marked `interrupted`, with the reason, so the UI shows a closed
+    session instead of a speaker stuck on the floor forever."""
+    if not RUNS_DIR.exists():
+        return
+    for path in sorted(RUNS_DIR.glob("*.json")):
+        try:
+            run = Run.from_record(json.loads(path.read_text(encoding="utf-8")))
+        except Exception as exc:  # noqa: BLE001 - one bad file must not block startup
+            print(f"WARNING: could not restore {path.name}: {exc}")
+            continue
+        if run.status not in TERMINAL_STATUSES:
+            run.status = "interrupted"
+            run.error = (
+                "The debate service restarted while this session was in progress. "
+                "Everything said up to that point is preserved; the session cannot resume."
+            )
+            run.finished_at = run.finished_at or datetime.now(timezone.utc).isoformat()
+            run.events.append(
+                {
+                    "seq": len(run.events),
+                    "type": "run_failed",
+                    "at": run.finished_at,
+                    "data": {"error": run.error, "status": "interrupted"},
+                }
+            )
+            run.save()
+        run.complete.set()
+        RUNS[run.run_id] = run
+
+
+_restore_runs()
+
+
 def _active_runs() -> int:
     return sum(1 for r in RUNS.values() if r.status in ("pending", "running"))
+
+
+# Persona management. Writes are refused while a debate is running.
+app.include_router(build_persona_router(lambda: _active_runs()))
 
 
 def _get_run(run_id: str) -> Run:
@@ -202,6 +326,7 @@ def _worker(run: Run) -> None:
         run.state = to_jsonable(state)
         run.discussion_id = run.state.get("discussion_id")
         run.status = run.state.get("status", "completed")
+        run.save()
 
         # Final pass: the report and charts are Week 4's, computed once at the
         # end from the finished record.
@@ -222,6 +347,7 @@ def _worker(run: Run) -> None:
         run.append("run_failed", {"error": str(exc)})
     finally:
         run.finished_at = datetime.now(timezone.utc).isoformat()
+        run.save()
         run.complete.set()
 
 
@@ -234,6 +360,8 @@ class StartRunRequest(BaseModel):
     strategy: str = Field("ring", pattern="^(ring|mesh)$")
     proposition: Optional[str] = Field(None, max_length=500)
     stop_on_convergence: bool = True
+    #: Member ids to seat. Omitted = every member on file.
+    agents: Optional[list[str]] = Field(None, max_length=8)
 
 
 # --- routes ----------------------------------------------------------------
@@ -270,6 +398,7 @@ def start_run(request: StartRunRequest):
             strategy=request.strategy,
             proposition=request.proposition,
             stop_on_convergence=request.stop_on_convergence,
+            agents=request.agents,
         ).validated()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

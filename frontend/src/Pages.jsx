@@ -29,7 +29,7 @@ import { API_BASE, discussionUrl } from './api.js';
 
 // --- chamber (live debate) ------------------------------------------------
 
-export function ChamberPage({ run }) {
+export function ChamberPage({ run, members }) {
   const agents = run.meta?.agents || [];
   const personas = run.personas || {};
   const stances = Object.fromEntries(
@@ -40,14 +40,14 @@ export function ChamberPage({ run }) {
   );
   const lastMessage = run.messages[run.messages.length - 1];
 
-  if (run.status === 'idle') return <Welcome />;
+  if (run.status === 'idle') return <Welcome members={members} />;
 
   return (
     <div className="chamber">
       <section className="panel chamber-stage">
         <div className="stage-head">
           <h2>
-            <Gavel size={17} aria-hidden="true" /> The floor
+            <Gavel size={17} aria-hidden="true" /> Who is talking to whom
           </h2>
           <p className="muted small motion">{run.meta?.topic}</p>
         </div>
@@ -60,8 +60,8 @@ export function ChamberPage({ run }) {
           stances={stances}
         />
         <p className="muted small ring-note">
-          Each line runs from a speaker to the member who hears them; its label is how much the
-          speaker values that member's perspective.
+          Arrows show who hears whom. The number is how much the speaker values the listener's
+          point of view (0 to 1).
         </p>
       </section>
 
@@ -91,7 +91,7 @@ export function ChamberPage({ run }) {
 
       <section className="panel floor-panel">
         <h2>
-          <ScrollText size={17} aria-hidden="true" /> Proceedings
+          <ScrollText size={17} aria-hidden="true" /> Conversation
         </h2>
         <Floor run={run} agents={agents} personas={personas} />
       </section>
@@ -99,40 +99,37 @@ export function ChamberPage({ run }) {
   );
 }
 
-function Welcome() {
+function Welcome({ members }) {
   return (
     <section className="panel welcome">
       <h2>
-        <Gavel size={18} aria-hidden="true" /> Convene the council
+        <Gavel size={18} aria-hidden="true" /> Start a debate
       </h2>
       <p>
-        Four standing members debate a question you set. Each forms an opening position from the
-        AI-regulation record, then argues over the rounds you allow — consulting sources mid-debate
-        when challenged.
+        Type a topic above and press <strong>Start debate</strong>. Each member forms an opening
+        position from the AI-regulation evidence, then they argue over the rounds you choose -
+        looking up sources when someone challenges them.
       </p>
-      <ul className="member-preview">
-        {[
-          ['eu_regulator', 'Dr. Elena Vasquez', 'Enforcement official, AI Act supervisory authority'],
-          ['startup_founder', 'Marcus Chen', 'Co-founder of an 11-person AI diagnostics startup'],
-          ['civil_society_advocate', 'Amara Okonkwo', 'Policy lead at a digital rights organisation'],
-          ['academic_researcher', 'Prof. Ingrid Halvorsen', 'Professor of AI governance and technology law'],
-        ].map(([id, name, role], index) => (
-          <li key={id}>
-            <span className="seat seat-sm" style={{ borderColor: agentColor(index), color: agentColor(index) }}>
-              {name.split(' ').filter((p) => !/^(dr|prof)\.?$/i.test(p)).slice(0, 2).map((p) => p[0]).join('')}
-            </span>
-            <div>
-              <strong>{name}</strong>
-              <span className="muted small role">
-                <RoleIcon personaId={id} size={12} /> {role}
-              </span>
-            </div>
-          </li>
-        ))}
-      </ul>
+      {members?.length > 0 ? (
+        <ul className="member-preview">
+          {members.map((member, index) => (
+            <li key={member.id}>
+              <Seat personaId={member.id} personas={{ [member.id]: member }} index={index} size="sm" />
+              <div>
+                <strong>{member.name}</strong>
+                <span className="muted small role">
+                  <RoleIcon personaId={member.id} size={12} /> {member.role}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted small">Loading members…</p>
+      )}
       <p className="muted small">
-        Every figure on the analytics pages is computed by the Week 4 engine from the transcript —
-        nothing is estimated in the browser.
+        Add, edit or remove members on the <a href="#/members">Members</a> page. Every number on the
+        Analytics page is calculated by the Week 4 engine from what was actually said.
       </p>
     </section>
   );
@@ -144,8 +141,8 @@ export function AnalyticsPage({ run }) {
   if (!run.analytics) {
     return (
       <section className="panel">
-        <h2>Analysis</h2>
-        <Empty label="Measurements appear once the first round closes." />
+        <h2>Analytics</h2>
+        <Empty label="Charts appear after the first round finishes." />
       </section>
     );
   }
@@ -155,26 +152,26 @@ export function AnalyticsPage({ run }) {
       <section className="panel">
         <h2>Opinion trajectory</h2>
         <OpinionTrajectory analytics={run.analytics} />
-        <p className="muted small">Stance runs from −2 (opposed) to +2 (supportive).</p>
+        <p className="muted small">Stance: −2 strongly against, +2 strongly for.</p>
       </section>
       <section className="panel">
         <h2>Agreement per round</h2>
         <AgreementTrend analytics={run.analytics} />
-        <p className="muted small">1.00 means the members hold identical positions.</p>
+        <p className="muted small">1.00 means everyone holds the same position.</p>
       </section>
       <section className="panel">
         <h2>Influence</h2>
         <InfluenceRanking analytics={run.analytics} />
       </section>
       <section className="panel">
-        <h2>Tone</h2>
+        <h2>Sentiment</h2>
         <SentimentPanel analytics={run.analytics} messages={run.messages} />
       </section>
 
       {run.retrievals.length > 0 && (
         <section className="panel span-2">
           <h2>
-            <BookOpen size={17} aria-hidden="true" /> The record consulted
+            <BookOpen size={17} aria-hidden="true" /> Evidence used
           </h2>
           <ul className="evidence">
             {run.retrievals.slice().reverse().map((event, index) => (
@@ -213,8 +210,8 @@ export function RecordPage({ run, charts }) {
   if (!finished) {
     return (
       <section className="panel">
-        <h2>Official record</h2>
-        <Empty label="The record is drawn up once the debate closes." />
+        <h2>Report</h2>
+        <Empty label="The report is ready when the debate finishes." />
       </section>
     );
   }
@@ -266,7 +263,7 @@ export function RecordPage({ run, charts }) {
 
       <section className="panel downloads">
         <h2>
-          <Download size={17} aria-hidden="true" /> Take the record away
+          <Download size={17} aria-hidden="true" /> Downloads
         </h2>
         <div className="download-row">
           {reportHref && (
@@ -306,24 +303,24 @@ export function ArchivePage({ onOpen, currentRunId }) {
   }, []);
 
   if (error) return <section className="panel warn">Could not load the archive: {error}</section>;
-  if (!runs) return <section className="panel"><Empty label="Loading past sittings…" /></section>;
+  if (!runs) return <section className="panel"><Empty label="Loading past debates…" /></section>;
   if (!runs.length) return <section className="panel"><Empty label="No debates on record yet." /></section>;
 
   return (
     <section className="panel">
       <h2>
-        <ScrollText size={17} aria-hidden="true" /> Past sittings
+        <ScrollText size={17} aria-hidden="true" /> Past debates
       </h2>
       <p className="muted small">
-        Kept in the service's memory for as long as it runs; each transcript is also written to disk.
+        Saved on the server - including debates that were interrupted before they finished.
       </p>
       <table className="archive">
         <thead>
           <tr>
-            <th scope="col">Question</th>
+            <th scope="col">Topic</th>
             <th scope="col">Status</th>
             <th scope="col">Rounds</th>
-            <th scope="col">Opened</th>
+            <th scope="col">Started</th>
             <th scope="col"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -369,13 +366,13 @@ export function AboutPage() {
   return (
     <div className="grid-2">
       <section className="panel">
-        <h2>How a sitting works</h2>
+        <h2>How a debate works</h2>
         <ol className="steps">
-          <li><strong>Opening positions.</strong> Each member forms one from the Week 1 knowledge base, scored on a −2…+2 scale.</li>
-          <li><strong>Rounds.</strong> Members speak in graph order; each hears the member the graph connects them to.</li>
-          <li><strong>Evidence.</strong> A member challenged for proof queries the record mid-debate.</li>
-          <li><strong>Measurement.</strong> After every round the transcript goes to the Week 4 engine for opinion change, agreement, influence and tone.</li>
-          <li><strong>The record.</strong> On close: a written report, both charts, and the raw transcript.</li>
+          <li><strong>Opening positions.</strong> Each member forms a view from the Week 1 evidence, scored from −2 (against) to +2 (for).</li>
+          <li><strong>Rounds.</strong> Members take turns; each replies to the member they are connected to.</li>
+          <li><strong>Evidence.</strong> When challenged, a member looks up sources during the debate.</li>
+          <li><strong>Analytics.</strong> After every round, the Week 4 engine measures opinion change, agreement, influence and sentiment.</li>
+          <li><strong>Report.</strong> At the end: a written report, both charts, and the full transcript.</li>
         </ol>
       </section>
 
