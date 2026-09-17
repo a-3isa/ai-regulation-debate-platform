@@ -1,0 +1,43 @@
+# Week 1 knowledge base (retrieval API), built from a source tree already in
+# the build context at vendor/week1 - rather than cloned from GitHub.
+#
+# WHY THIS VARIANT EXISTS
+# The regular Dockerfile clones Week 1 at a pinned commit. The repository is
+# private, so the Docker daemon cannot read it; uploading the source to the host
+# is a better trade than giving the daemon a GitHub credential. Deployments use
+# this file until the repository is public. Keep it in step with ./Dockerfile.
+#
+# The uploaded tree deliberately excludes .env, .env.local, .vercel and data/:
+# credentials come from the compose environment, and the corpus lives in the
+# pgvector database, not on disk.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/week1/src \
+    PORT=8200
+
+COPY vendor/week1 /week1
+
+# The retrieval API needs only the serving dependencies; the ingestion stack
+# (beautifulsoup4, lxml, trafilatura, tiktoken, ddgs) is never imported here.
+RUN pip install --no-cache-dir -r /week1/api/requirements.txt "gunicorn>=22.0"
+
+WORKDIR /week1
+
+RUN useradd --create-home --uid 10003 knowledge && chown -R knowledge:knowledge /week1
+USER knowledge
+
+EXPOSE 8200
+
+# Liveness only: is gunicorn accepting connections. The root page answers 401
+# when API_KEY is set, so an HTTP status check would read a healthy, gated
+# service as down.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import socket; socket.create_connection(('127.0.0.1', 8200), 3).close()"
+
+# app.py exposes a module-level `app`; api/index.py is the Vercel wrapper and is
+# not used here.
+# --access-logfile - sends one line per request to stdout, so
+# `docker compose logs knowledge` shows which searches were served here.
+CMD ["gunicorn", "--bind", "0.0.0.0:8200", "--workers", "2", "--timeout", "60", "--access-logfile", "-", "webui.app:app"]

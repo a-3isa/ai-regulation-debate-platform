@@ -52,7 +52,7 @@ if str(WEEK3_ROOT) not in sys.path:
 import src.config as week3_config  # noqa: E402,F401
 
 from src.agents.agent_node import run_turn  # noqa: E402
-from src.graph.build_graph import graph_config  # noqa: E402
+from src.graph.build_graph import graph_config, load_personas, persona_stakeholder_tag  # noqa: E402
 from src.opinions.tracker import (  # noqa: E402
     average_movement,
     discussion_converged,
@@ -82,6 +82,74 @@ def _load_initial_opinion_builder():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.build_entry
+
+
+
+def _weighted_adjacency(graph: dict) -> dict[str, dict[str, float]]:
+    """The discussion graph as {sender: {recipient: weight}}.
+
+    WHY NOT THE PLAIN ADJACENCY LIST
+    Week 3's in-memory shape is `dict[str, list[str]]` and the real affinity
+    weights live separately in the run config. Persisted that way, Week 4's
+    `graph_loader.load_weighted_graph()` finds a list, falls back to its
+    documented default of 1.0 for every edge, and the interaction graph draws
+    every edge identically - throwing away the one thing that visualization is
+    supposed to show. Writing the weights into `graph` itself is the shape
+    Week 4 already reads, and validation accepts it (it requires a dict whose
+    keys are agents, which this is).
+
+    Recipient order is preserved from `build_adjacency()`, which sorts by
+    descending weight - `routing.get_recipients()` does `list(adjacency[s])`,
+    which yields dict keys in insertion order, so ordering survives.
+
+    An edge with no recorded weight falls back to 1.0, the same default Week 4
+    uses, rather than being dropped.
+    """
+    adjacency = graph.get("adjacency", {}) or {}
+    weights = graph.get("weights", {}) or {}
+    return {
+        sender: {
+            recipient: float(weights.get(sender, {}).get(recipient, 1.0))
+            for recipient in recipients
+        }
+        for sender, recipients in adjacency.items()
+    }
+
+
+def _persona_cards(agents: list[str]) -> dict[str, dict]:
+    """Who each agent actually is, for the UI to show a person rather than an id.
+
+    Read from the Week 2 persona YAML that Week 3 vendors, so the name, role and
+    stance shown on screen are the same ones the agent is prompted with - not a
+    second description maintained in the frontend that could drift from it.
+    A persona that cannot be loaded degrades to just its id.
+    """
+    try:
+        personas = load_personas()
+    except Exception:  # noqa: BLE001 - the UI can live without the detail
+        return {persona_id: {"persona_id": persona_id} for persona_id in agents}
+
+    cards: dict[str, dict] = {}
+    for persona_id in agents:
+        persona = personas.get(persona_id)
+        if persona is None:
+            cards[persona_id] = {"persona_id": persona_id}
+            continue
+        try:
+            tag = persona_stakeholder_tag(persona)
+        except Exception:  # noqa: BLE001
+            tag = ""
+        stance = getattr(persona, "stance", None)
+        cards[persona_id] = {
+            "persona_id": persona_id,
+            "name": persona.name,
+            "role": persona.role,
+            "stakeholder_tag": tag,
+            "core_position": getattr(stance, "core_position", "") or "",
+            "open_to": list(getattr(stance, "open_to", []) or [])[:2],
+            "priorities": list(getattr(persona, "priorities", []) or [])[:3],
+        }
+    return cards
 
 
 @dataclass
@@ -304,7 +372,7 @@ def run_debate(
         discussion_id,
         cfg.topic,
         agents,
-        graph["adjacency"],
+        _weighted_adjacency(graph),
         cfg.num_rounds,
         config={
             "proposition": proposition,
@@ -328,7 +396,8 @@ def run_debate(
             "topic": cfg.topic,
             "proposition": proposition,
             "agents": agents,
-            "graph": graph["adjacency"],
+            "personas": _persona_cards(agents),
+            "graph": _weighted_adjacency(graph),
             "graph_weights": graph.get("weights", {}),
             "num_rounds": cfg.num_rounds,
             "llm_stubbed": week3_config.llm_is_stubbed(),

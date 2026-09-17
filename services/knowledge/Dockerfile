@@ -38,9 +38,14 @@ USER knowledge
 
 EXPOSE 8200
 
+# Liveness only: is gunicorn accepting connections. An HTTP check does not work
+# here - the root page answers 401 when API_KEY is set, and urlopen() raises on
+# a 401 instead of returning it, so a healthy, gated service would read as down.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8200/', timeout=4).status in (200, 401) else 1)"
+    CMD python -c "import socket; socket.create_connection(('127.0.0.1', 8200), 3).close()"
 
 # app.py exposes a module-level `app`; api/index.py is the Vercel wrapper and is
 # not used here.
-CMD ["gunicorn", "--bind", "0.0.0.0:8200", "--workers", "2", "--timeout", "60", "webui.app:app"]
+# --access-logfile - sends one line per request to stdout, so
+# `docker compose logs knowledge` shows which searches were served here.
+CMD ["gunicorn", "--bind", "0.0.0.0:8200", "--workers", "2", "--timeout", "60", "--access-logfile", "-", "webui.app:app"]

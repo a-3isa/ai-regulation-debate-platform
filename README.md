@@ -114,14 +114,27 @@ your own server instead:
 WEEK1_DATABASE_URL=postgresql://...   # the pgvector database with the corpus
 OPENAI_API_KEY=sk-...                 # same embedding model the corpus used
 WEEK1_RETRIEVAL_URL=http://knowledge:8200
+WEEK1_EMBEDDING_DIMENSIONS=512       # must match the corpus
+COMPOSE_PROFILES=selfhosted-week1
 
-docker compose --profile selfhosted-week1 up -d --build
+docker compose up -d --build
 ```
 
 The corpus itself is not re-embedded: the service reads whatever database you
-point it at. A query must be embedded with the same model as the stored vectors
-(2000-dimension `text-embedding-3-large`), which is why `OPENAI_API_KEY` is
-still required even when nothing is being ingested.
+point it at. A query must be embedded with the same model **and dimension
+count** as the stored vectors, which is why `OPENAI_API_KEY` is still required
+even when nothing is being ingested. The deployed corpus is
+`text-embedding-3-large` at **512** dimensions - not the 2000 the Week 1 repo's
+example config shows. A mismatch fails loudly with
+`different vector dimensions 512 and 2000`, so take `EMBEDDING_MODEL` and
+`EMBEDDING_DIMENSIONS` from the Week 1 `.env` that built the corpus.
+
+Set `COMPOSE_PROFILES=selfhosted-week1` in `.env` so a plain
+`docker compose up` always includes the service.
+
+Verified in production: the same query returns the same top three documents
+(AI Act Articles 16, 26 and 14, in that order) from the self-hosted service and
+from the Vercel deployment.
 
 ## Debate API
 

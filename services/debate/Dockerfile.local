@@ -1,0 +1,45 @@
+# The debate service, built from a Week 3 source tree already present in the
+# build context at vendor/week3 - rather than cloned from GitHub.
+#
+# WHY THIS VARIANT EXISTS
+# The regular Dockerfile clones Week 3 at a pinned commit, which keeps this repo
+# free of a second copy of that code. That needs the repository to be readable
+# by the Docker daemon, and it is private: the build fails with "could not read
+# Username for 'https://github.com'". Putting a GitHub credential inside the
+# daemon would be a worse trade than uploading the source to the host, so
+# deployments use this file until the repo is public.
+#
+# The build context must contain vendor/week3 (see docker-compose.override.yml
+# on the deployment host). Keep this file in step with ../Dockerfile.
+FROM python:3.12-slim
+
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    WEEK3_ROOT=/week3 \
+    PYTHONPATH=/week3:/app \
+    PORT=8100
+
+COPY vendor/week3 /week3
+
+RUN pip install --no-cache-dir -r /week3/requirements.txt
+
+WORKDIR /app
+COPY services/debate/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY services/debate/app ./app
+
+# Agent memory is written under /week3/src/vendor/data, and finished runs under
+# /data/discussions; both must be writable by the non-root user.
+RUN useradd --create-home --uid 10002 debate \
+    && mkdir -p /data/discussions /week3/src/vendor/data /week3/outputs/logs \
+    && chown -R debate:debate /app /data /week3
+USER debate
+
+EXPOSE 8100
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=4).status == 200 else 1)"
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100"]
