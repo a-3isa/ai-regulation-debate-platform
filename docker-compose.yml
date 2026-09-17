@@ -35,6 +35,37 @@ services:
       traefik.http.middlewares.analytics-strip.stripprefix.prefixes: /analytics
       traefik.http.services.analytics.loadbalancer.server.port: "8000"
 
+  # Week 1 knowledge base, self-hosted instead of Vercel. Opt-in:
+  #   docker compose --profile selfhosted-week1 up -d --build
+  # then point the debate service at it with
+  #   WEEK1_RETRIEVAL_URL=http://knowledge:8200
+  # It needs the pgvector database that holds the embedded corpus, and the same
+  # embedding model the corpus was built with.
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile
+    image: knowledge-api:latest
+    restart: unless-stopped
+    profiles: ["selfhosted-week1"]
+    environment:
+      DATABASE_URL: ${WEEK1_DATABASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      API_KEY: ${WEEK1_API_KEY:-}
+      EMBEDDING_MODEL: ${WEEK1_EMBEDDING_MODEL:-text-embedding-3-large}
+      EMBEDDING_DIMENSIONS: ${WEEK1_EMBEDDING_DIMENSIONS:-2000}
+      RETRIEVAL_TOP_K: ${WEEK1_TOP_K:-5}
+    networks: [platform, edge]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-platform_edge}
+      traefik.http.routers.knowledge.rule: Host(`${PUBLIC_HOST}`) && PathPrefix(`/knowledge`)
+      traefik.http.routers.knowledge.entrypoints: websecure
+      traefik.http.routers.knowledge.tls.certresolver: ${CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.knowledge.middlewares: knowledge-strip
+      traefik.http.middlewares.knowledge-strip.stripprefix.prefixes: /knowledge
+      traefik.http.services.knowledge.loadbalancer.server.port: "8200"
+
   debate:
     build:
       context: .

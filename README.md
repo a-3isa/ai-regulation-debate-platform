@@ -69,7 +69,19 @@ Docker provider and an ACME resolver:
 https://$PUBLIC_HOST/            → ui
 https://$PUBLIC_HOST/api/        → debate service
 https://$PUBLIC_HOST/analytics/  → Week 4 analytics service
+https://$PUBLIC_HOST/knowledge/  → Week 1 retrieval (only with the selfhosted-week1 profile)
 ```
+
+The quickest path on a server that already runs Traefik:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a-3isa/ai-regulation-debate-platform/main/deploy.sh | bash
+# fills in .env from the example on the first run, then re-run it
+```
+
+`deploy.sh` clones or updates the checkout, creates the Docker network,
+attaches Traefik to it when Traefik runs in a bridge network, builds, and then
+verifies `/api/health` and `/analytics/health` over HTTPS. It is idempotent.
 
 ```bash
 cp .env.example .env    # set PUBLIC_HOST, PUBLIC_ORIGIN, VITE_API_BASE, TRAEFIK_NETWORK, keys
@@ -87,9 +99,29 @@ image rebuild, not just a restart.
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Week 2's LLM provider for agent turns. The model must support tool calling. |
 | `AGENT_LLM_STUB` | `1` disables all LLM calls (free, offline, deterministic). |
 | `WEEK1_RETRIEVAL_URL`, `WEEK1_API_KEY` | Week 1 knowledge base used for initial opinions and mid-debate evidence. |
+| `WEEK1_DATABASE_URL`, `OPENAI_API_KEY` | Only for self-hosting Week 1 (`--profile selfhosted-week1`): the pgvector database holding the embedded corpus, and the embedding model it was built with. |
 | `DEBATE_MAX_ROUNDS`, `DEBATE_MAX_CONCURRENT_RUNS` | Bound how much LLM credit one request, or one impatient user, can spend. |
 | `SENTIMENT_BACKEND` | `vader` (small, deterministic) or `transformer` (better, ~2.5 GB). |
 | `PUBLIC_HOST`, `PUBLIC_ORIGIN`, `VITE_API_BASE` | Routing and CORS. |
+
+## Self-hosting the Week 1 knowledge base
+
+By default the agents query the Week 1 API deployed on Vercel. To run it on
+your own server instead:
+
+```bash
+# in .env
+WEEK1_DATABASE_URL=postgresql://...   # the pgvector database with the corpus
+OPENAI_API_KEY=sk-...                 # same embedding model the corpus used
+WEEK1_RETRIEVAL_URL=http://knowledge:8200
+
+docker compose --profile selfhosted-week1 up -d --build
+```
+
+The corpus itself is not re-embedded: the service reads whatever database you
+point it at. A query must be embedded with the same model as the stored vectors
+(2000-dimension `text-embedding-3-large`), which is why `OPENAI_API_KEY` is
+still required even when nothing is being ingested.
 
 ## Debate API
 
