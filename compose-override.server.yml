@@ -1,0 +1,51 @@
+# Server-side overrides: build every week from local source instead of cloning.
+#
+# WHY THIS EXISTS
+# The committed docker-compose.yml clones all four weeks from GitHub, passing a
+# token as a BuildKit secret. On a machine you control that is the right
+# default. On a shared deployment host it is a worse trade: the token has to be
+# stored somewhere on the box to be available at build time, and it outlives the
+# build. So this host uploads the sources instead and no GitHub credential ever
+# reaches it.
+#
+#   /docker/ai-debate/app/vendor/week1   Week 1 source, without .env/.vercel/data
+#   /docker/ai-debate/app/vendor/week3   Week 3 source (Week 2 vendored inside it)
+#   /docker/ai-debate/app/vendor/week4   Week 4 source
+#
+# Everything else - routing, environment, volumes, the dashboard - comes from
+# the committed compose file unchanged, so this override stays small enough to
+# keep in step with it.
+#
+# To drop this file: make the repositories public, or accept a token on the
+# host, and the committed compose builds straight from git with no uploads.
+#
+# Copied to the server as docker-compose.override.yml, where compose picks it
+# up automatically.
+
+services:
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile.local
+
+  debate:
+    build:
+      context: .
+      dockerfile: services/debate/Dockerfile.local
+
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile.local
+    # This host's corpus already lives in a database of its own, named by
+    # WEEK1_DATABASE_URL in .env. The bundled `db` service exists for a machine
+    # that has nowhere to put one; starting a second, empty Postgres here would
+    # burn ~400 MB of image and a slice of a 4 GB box to serve nothing. Dropping
+    # the dependency is what lets the profile below keep it stopped.
+    depends_on: !reset []
+
+  # Kept out of the default set on this host - see the note on `knowledge`.
+  # Start it deliberately if the corpus ever moves here:
+  #   docker compose --profile corpus-db up -d db
+  db:
+    profiles: ["corpus-db"]

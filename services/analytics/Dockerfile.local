@@ -1,0 +1,48 @@
+# Week 4 analytics engine, built from a source tree already in the build
+# context at vendor/week4 - rather than cloned from GitHub.
+#
+# WHY THIS VARIANT EXISTS
+# The regular Dockerfile clones Week 4 at a pinned commit, which is the right
+# default and needs a GitHub credential because the repository is private. That
+# credential is passed as a BuildKit secret and never lands in a layer, so it is
+# a perfectly good trade on a machine you control.
+#
+# It is a worse trade on a shared deployment host, where the credential outlives
+# the build in whatever file or environment put it there. On this project's VPS
+# the sources are uploaded instead and this file builds from them, so no GitHub
+# token ever reaches the server. Same pattern, and the same reasoning, as
+# ../debate/Dockerfile.local and ../knowledge/Dockerfile.local.
+#
+# The build context must contain vendor/week4 (see docker-compose.override.yml
+# on the deployment host). Keep this file in step with ./Dockerfile.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    PORT=8000
+
+WORKDIR /app
+COPY vendor/week4 /app
+
+# The uploaded tree carries no .git, so record where it came from the way the
+# cloning variant does - `make refs` and deploy.sh both read this file, and a
+# service that cannot say what it was built from is the one you end up guessing
+# about at 2am.
+RUN test -f /app/SOURCE_REF || echo 'week4 (uploaded source, not a clone)' > /app/SOURCE_REF
+
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# The engine reads discussions from outputs/discussions and writes generated
+# artifacts to reports/; both must exist and be writable by the non-root user.
+RUN useradd --create-home --uid 10004 analytics \
+    && mkdir -p /app/outputs/discussions /app/reports \
+    && chown -R analytics:analytics /app
+USER analytics
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+
+CMD ["uvicorn", "src.analytics.api:app", "--host", "0.0.0.0", "--port", "8000"]
