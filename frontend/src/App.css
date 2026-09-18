@@ -969,8 +969,13 @@ button.danger:hover:not(:disabled) {
 
 .role {
   display: inline-flex;
-  align-items: center;
-  gap: 5px;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.role > svg {
+  flex: none;
+  margin-top: 4px;
 }
 
 .member-stance {
@@ -1191,23 +1196,28 @@ button.danger:hover:not(:disabled) {
 
 .member-preview {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: var(--s-3);
   list-style: none;
-  margin: var(--s-5) 0;
+  margin: var(--s-4) 0 var(--s-5);
   padding: 0;
 }
 
+/* Top-aligned, not centred: a two-line name with a three-line role underneath
+ * pushed the avatar to the vertical middle of the card and left it floating
+ * beside the wrong words. */
 .member-preview li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--s-3);
-  padding: var(--s-3);
+  padding: var(--s-3) var(--s-4);
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   min-width: 0;
 }
+
+.member-preview li > div { min-width: 0; }
 
 .member-preview strong {
   display: block;
