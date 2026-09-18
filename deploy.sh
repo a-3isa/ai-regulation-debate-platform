@@ -2,15 +2,22 @@
 # Deploy the platform on a server that already runs Traefik.
 #
 #   ssh root@<server>
-#   curl -fsSL https://raw.githubusercontent.com/a-3isa/ai-regulation-debate-platform/main/deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Abdo0213/week05_production_app/main/deploy.sh | bash
 #
 # or, from a checkout:   ./deploy.sh
 #
 # The script is idempotent: run it again to pull changes and rebuild.
+#
+# The four week repositories are private, so the builds need a GitHub token
+# with repo:read. Put GIT_TOKEN in .env, or export it before running:
+#
+#   GIT_TOKEN=ghp_... ./deploy.sh
+#
+# It is passed to BuildKit as a secret, so it never lands in an image layer.
 
 set -euo pipefail
 
-REPO="${REPO:-https://github.com/a-3isa/ai-regulation-debate-platform.git}"
+REPO="${REPO:-https://github.com/Abdo0213/week05_production_app.git}"
 DEPLOY_DIR="${DEPLOY_DIR:-/docker/ai-debate}"
 NETWORK="${NETWORK:-platform_edge}"
 
@@ -35,7 +42,7 @@ cd "$APP_DIR"
 if [ ! -f .env ]; then
   cp .env.example .env
   say "Created $APP_DIR/.env from the example"
-  echo "Fill in PUBLIC_HOST, OPENROUTER_API_KEY and WEEK1_API_KEY, then re-run this script."
+  echo "Fill in PUBLIC_HOST, GIT_TOKEN, OPENROUTER_API_KEY and WEEK1_API_KEY, then re-run."
   echo "  nano $APP_DIR/.env"
   exit 1
 fi
@@ -46,6 +53,10 @@ set -a; . ./.env; set +a
 : "${PUBLIC_HOST:?set PUBLIC_HOST in .env}"
 if [ -z "${OPENROUTER_API_KEY:-}" ] && [ "${AGENT_LLM_STUB:-0}" != "1" ]; then
   echo "WARNING: OPENROUTER_API_KEY is empty - agents will produce stub turns."
+fi
+if [ -z "${GIT_TOKEN:-}" ]; then
+  echo "WARNING: GIT_TOKEN is empty. The week repositories are private, so the"
+  echo "         builds will fail with \"could not read Username\"."
 fi
 
 # --- 3. network ----------------------------------------------------------
@@ -93,8 +104,11 @@ print(json.load(urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5
 fi
 
 # --- 5. build and start --------------------------------------------------
-say "Building and starting"
-COMPOSE_PROFILES="${COMPOSE_PROFILES:-}" docker compose up -d --build
+# BuildKit is required: the week clones use `--mount=type=secret`, which the
+# legacy builder does not understand.
+say "Building every week from GitHub and starting the stack"
+export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+docker compose up -d --build
 
 # --- 6. verify -----------------------------------------------------------
 say "Waiting for the services to report healthy"
@@ -109,6 +123,15 @@ sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=3).
 done
 
 docker compose ps
+
+# Which commit of each week is actually running. Worth printing on every
+# deploy: "it is broken on the server" is a different problem depending on
+# whether the server is running the ref you think it is.
+say "Week sources baked into the running images"
+docker compose exec -T analytics cat /app/SOURCE_REF 2>/dev/null || echo "analytics: no ref recorded"
+docker compose exec -T debate    cat /SOURCE_REFS   2>/dev/null || echo "debate:    no ref recorded"
+docker compose exec -T knowledge cat /SOURCE_REFS   2>/dev/null || echo "knowledge: no ref recorded"
+
 say "Checking the public endpoints"
 curl -fsS "https://$PUBLIC_HOST/api/health" && echo
 curl -fsS "https://$PUBLIC_HOST/analytics/health" && echo

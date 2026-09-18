@@ -4,14 +4,41 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="A standing council of AI personas debating artificial-intelligence policy, with live analytics." />
-    <meta name="color-scheme" content="dark" />
+    <!-- Both, so the first paint matches the OS before React runs; theme.js
+         narrows it to the resolved theme and keeps this tag in step. -->
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbfbfd" />
     <title>The AI Regulation Council</title>
+
+    <!-- Inter is the web fallback only. The stack in App.css asks for the
+         platform UI font first (San Francisco, Segoe UI Variable), so on macOS,
+         iOS and Windows nothing is downloaded and the interface matches the
+         system. Inter carries Linux and screenshots. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Lato:wght@400;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&display=swap"
       rel="stylesheet"
     />
+
+    <!-- Paint the saved theme before the first frame. Without this, a dark-mode
+         visitor gets a white flash on every load while the bundle parses. -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('council-theme');
+          var dark =
+            saved === 'dark' ||
+            ((!saved || saved === 'system') &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var theme = dark ? 'dark' : 'light';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          /* storage blocked - the default light theme is fine */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

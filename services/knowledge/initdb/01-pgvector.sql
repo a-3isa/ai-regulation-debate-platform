@@ -1,0 +1,11 @@
+-- Enable pgvector on a fresh database.
+--
+-- Runs once, on an empty data directory, before Postgres accepts connections.
+-- Docker skips this entire directory if the pgdata volume already has a
+-- cluster in it, so it cannot clobber an existing corpus - and `IF NOT EXISTS`
+-- makes it safe to run by hand as well.
+--
+-- Only the extension is created here. The tables and the embedded corpus are
+-- Week 1's to build with its own ingestion pipeline; guessing at its schema
+-- from this repo would be a second definition of it, free to drift.
+CREATE EXTENSION IF NOT EXISTS vector;

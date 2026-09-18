@@ -6,11 +6,17 @@
 // hardest thing to see in a flat transcript. Drawing the graph with the active
 // edge lit makes the routing visible while it happens, and labels each edge
 // with its real affinity weight.
+//
+// Every component here takes a `personaId` and resolves colour through the
+// shared registry, so a member keeps one colour across the ring, the roster,
+// the transcript and every chart. Nothing here derives colour from a loop
+// index; see agentColors.js for what went wrong when it did.
 
 import React, { useEffect, useRef } from 'react';
 import { GraduationCap, Landmark, Loader2, Megaphone, Quote, Rocket, Search, UserRound } from 'lucide-react';
 
-import { agentColor, prettyName } from './Analytics.jsx';
+import { useAgentColor, useAgentColors } from './AgentColorContext.jsx';
+import { prettyName } from './Analytics.jsx';
 
 // A role glyph per persona - vector icons, never emoji, so they inherit colour
 // and stay legible at any size.
@@ -36,14 +42,10 @@ export function displayName(personas, personaId) {
   return personas?.[personaId]?.name || prettyName(personaId);
 }
 
-export function Seat({ personaId, personas, index, size = 'md' }) {
-  const color = agentColor(index);
+export function Seat({ personaId, personas, size = 'md' }) {
+  const color = useAgentColor(personaId);
   return (
-    <span
-      className={`seat seat-${size}`}
-      style={{ borderColor: color, color }}
-      aria-hidden="true"
-    >
+    <span className={`seat seat-${size}`} style={{ color }} aria-hidden="true">
       {initials(personas?.[personaId]?.name, personaId)}
     </span>
   );
@@ -52,6 +54,7 @@ export function Seat({ personaId, personas, index, size = 'md' }) {
 // --- the ring -------------------------------------------------------------
 
 export function ChamberRing({ agents, personas, graph, speaking, lastMessage, stances }) {
+  const { colorFor } = useAgentColors();
   if (!agents?.length) return null;
 
   const size = 340;
@@ -61,7 +64,6 @@ export function ChamberRing({ agents, personas, graph, speaking, lastMessage, st
     const angle = (index / agents.length) * 2 * Math.PI - Math.PI / 2;
     return {
       agent,
-      index,
       x: centre + radius * Math.cos(angle),
       y: centre + radius * Math.sin(angle),
     };
@@ -102,7 +104,7 @@ export function ChamberRing({ agents, personas, graph, speaking, lastMessage, st
           <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line-strong)" />
         </marker>
         <marker id="arrow-live" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--brass)" />
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
         </marker>
       </defs>
 
@@ -148,10 +150,10 @@ export function ChamberRing({ agents, personas, graph, speaking, lastMessage, st
         );
       })}
 
-      {seats.map(({ agent, index, x, y }) => {
+      {seats.map(({ agent, x, y }) => {
         const isSpeaking = agent === speaking;
         const stance = stances?.[agent];
-        const color = agentColor(index);
+        const color = colorFor(agent);
         const label = (personas?.[agent]?.name || prettyName(agent)).split(' ').slice(-1)[0];
         return (
           <g key={agent} className={isSpeaking ? 'ring-seat speaking' : 'ring-seat'}>
@@ -177,12 +179,12 @@ export function ChamberRing({ agents, personas, graph, speaking, lastMessage, st
 
 // --- the roster -----------------------------------------------------------
 
-export function MemberCard({ personaId, persona, personas, index, stance, delta, speaking }) {
-  const color = agentColor(index);
+export function MemberCard({ personaId, persona, personas, stance, delta, speaking }) {
+  const color = useAgentColor(personaId);
   return (
     <article className={speaking ? 'member speaking' : 'member'} style={{ '--who': color }}>
       <div className="member-head">
-        <Seat personaId={personaId} personas={personas} index={index} />
+        <Seat personaId={personaId} personas={personas} />
         <div className="member-id">
           <strong>{persona?.name || prettyName(personaId)}</strong>
           <span className="muted small role">
@@ -238,7 +240,8 @@ function StanceMeter({ value, color, personaId }) {
 
 // --- the floor ------------------------------------------------------------
 
-export function Floor({ run, agents, personas }) {
+export function Floor({ run, personas }) {
+  const { colorFor } = useAgentColors();
   const endRef = useRef(null);
 
   useEffect(() => {
@@ -279,11 +282,10 @@ export function Floor({ run, agents, personas }) {
             </h3>
 
             {messages.map((message) => {
-              const index = Math.max(0, agents.indexOf(message.sender));
-              const color = agentColor(index);
+              const color = colorFor(message.sender);
               return (
                 <article key={message.message_id} className="speech" style={{ '--who': color }}>
-                  <Seat personaId={message.sender} personas={personas} index={index} size="sm" />
+                  <Seat personaId={message.sender} personas={personas} size="sm" />
                   <div className="speech-body">
                     <header>
                       <strong style={{ color }}>{displayName(personas, message.sender)}</strong>
@@ -306,13 +308,8 @@ export function Floor({ run, agents, personas }) {
       })}
 
       {run.speaking && (
-        <div className="speech speaking-now" style={{ '--who': agentColor(Math.max(0, agents.indexOf(run.speaking))) }}>
-          <Seat
-            personaId={run.speaking}
-            personas={personas}
-            index={Math.max(0, agents.indexOf(run.speaking))}
-            size="sm"
-          />
+        <div className="speech speaking-now" style={{ '--who': colorFor(run.speaking) }}>
+          <Seat personaId={run.speaking} personas={personas} size="sm" />
           <div className="speech-body">
             <header>
               <strong>{displayName(personas, run.speaking)}</strong>

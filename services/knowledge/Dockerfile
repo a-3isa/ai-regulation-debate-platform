@@ -3,6 +3,16 @@
 # Same pattern as the debate service: the Week 1 repository is cloned at a
 # pinned commit rather than vendored, so this repo holds no second copy of it.
 #
+# PRIVATE REPOSITORIES
+# Every week repo in this project is private, so the daemon cannot clone them
+# anonymously. Pass a token as a BuildKit secret and the clone uses it:
+#
+#   GIT_TOKEN=ghp_... docker compose build
+#
+# The secret is mounted only for the RUN that needs it, so it never reaches a
+# layer or the image history. Without a token the clone is anonymous, which is
+# what you want once the repositories are public.
+#
 # It needs a PostgreSQL database with pgvector that already contains the
 # embedded corpus (DATABASE_URL), and the same embedding model the corpus was
 # built with (OPENAI_API_KEY) so a query vector is comparable to the stored
@@ -23,9 +33,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --branch "$WEEK1_BRANCH" "$WEEK1_REPO" /week1 \
-    && git -C /week1 checkout --quiet "$WEEK1_REF" \
-    && rm -rf /week1/.git
+RUN --mount=type=secret,id=git_token \
+    set -eu; \
+    if [ -s /run/secrets/git_token ]; then \
+        git config --global credential.helper 'store --file=/tmp/.git-cred'; \
+        printf 'https://x-access-token:%s@github.com\n' "$(cat /run/secrets/git_token)" > /tmp/.git-cred; \
+    fi; \
+    git clone --branch "$WEEK1_BRANCH" "$WEEK1_REPO" /week1; \
+    if [ -n "$WEEK1_REF" ]; then git -C /week1 checkout --quiet "$WEEK1_REF"; fi; \
+    git -C /week1 log -1 --format='week1 %H %s' > /SOURCE_REFS; \
+    rm -rf /week1/.git /tmp/.git-cred; \
+    git config --global --unset credential.helper || true
 
 # The retrieval API needs only the serving dependencies; the ingestion stack
 # (beautifulsoup4, lxml, trafilatura, tiktoken, ddgs) is never imported here.

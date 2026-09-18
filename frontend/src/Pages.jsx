@@ -10,9 +10,14 @@ import {
   ExternalLink,
   FileText,
   Gavel,
+  Handshake,
+  LineChart,
   Network,
+  Radio,
   ScrollText,
-  Share2,
+  Smile,
+  TrendingUp,
+  Users,
 } from 'lucide-react';
 
 import {
@@ -21,9 +26,9 @@ import {
   InfluenceRanking,
   OpinionTrajectory,
   SentimentPanel,
-  agentColor,
   prettyName,
 } from './Analytics.jsx';
+import { ClosingNote, LiveTrajectory, NowSpeaking, RoundProgress } from './Live.jsx';
 import { ChamberRing, Floor, MemberCard, RoleIcon, Seat, displayName } from './Stage.jsx';
 import { API_BASE, discussionUrl } from './api.js';
 
@@ -32,6 +37,8 @@ import { API_BASE, discussionUrl } from './api.js';
 export function ChamberPage({ run, members }) {
   const agents = run.meta?.agents || [];
   const personas = run.personas || {};
+  const totalRounds = run.meta?.num_rounds ?? 0;
+  const finished = ['completed', 'converged', 'cancelled'].includes(run.status);
   const stances = Object.fromEntries(
     Object.entries(run.opinions).map(([agent, history]) => [
       agent,
@@ -44,12 +51,20 @@ export function ChamberPage({ run, members }) {
 
   return (
     <div className="chamber">
+      <ClosingNote run={run} />
+
       <section className="panel chamber-stage">
         <div className="stage-head">
           <h2>
             <Gavel size={17} aria-hidden="true" /> Who is talking to whom
           </h2>
           <p className="muted small motion">{run.meta?.topic}</p>
+          <RoundProgress
+            current={run.currentRound}
+            total={totalRounds}
+            finished={finished}
+          />
+          <NowSpeaking run={run} />
         </div>
         <ChamberRing
           agents={agents}
@@ -66,7 +81,7 @@ export function ChamberPage({ run, members }) {
       </section>
 
       <section className="roster">
-        {agents.map((agent, index) => {
+        {agents.map((agent) => {
           const history = run.opinions[agent] || [];
           const latest = history[history.length - 1];
           const previous = history[history.length - 2];
@@ -80,7 +95,6 @@ export function ChamberPage({ run, members }) {
               personaId={agent}
               persona={personas[agent]}
               personas={personas}
-              index={index}
               stance={latest?.stance_score}
               delta={delta}
               speaking={run.speaking === agent}
@@ -89,11 +103,18 @@ export function ChamberPage({ run, members }) {
         })}
       </section>
 
+      <section className="panel live-panel">
+        <h2>
+          <TrendingUp size={17} aria-hidden="true" /> Positions, as they move
+        </h2>
+        <LiveTrajectory run={run} />
+      </section>
+
       <section className="panel floor-panel">
         <h2>
           <ScrollText size={17} aria-hidden="true" /> Conversation
         </h2>
-        <Floor run={run} agents={agents} personas={personas} />
+        <Floor run={run} personas={personas} />
       </section>
     </div>
   );
@@ -103,33 +124,39 @@ function Welcome({ members }) {
   return (
     <section className="panel welcome">
       <h2>
-        <Gavel size={18} aria-hidden="true" /> Start a debate
+        <Gavel size={18} aria-hidden="true" /> The council is seated
       </h2>
       <p>
-        Type a topic above and press <strong>Start debate</strong>. Each member forms an opening
-        position from the AI-regulation evidence, then they argue over the rounds you choose -
-        looking up sources when someone challenges them.
+        Give them something to argue about. Each member reads the AI-regulation evidence, takes a
+        position, and then spends the rounds you choose trying to move everybody else — looking up
+        sources when someone demands proof.
       </p>
       {members?.length > 0 ? (
-        <ul className="member-preview">
-          {members.map((member, index) => (
-            <li key={member.id}>
-              <Seat personaId={member.id} personas={{ [member.id]: member }} index={index} size="sm" />
-              <div>
-                <strong>{member.name}</strong>
-                <span className="muted small role">
-                  <RoleIcon personaId={member.id} size={12} /> {member.role}
-                </span>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <>
+          <p className="muted small welcome-label">
+            <Users size={13} aria-hidden="true" /> Today's council
+          </p>
+          <ul className="member-preview">
+            {members.map((member) => (
+              <li key={member.id}>
+                <Seat personaId={member.id} personas={{ [member.id]: member }} size="sm" />
+                <div>
+                  <strong>{member.name}</strong>
+                  <span className="muted small role">
+                    <RoleIcon personaId={member.id} size={12} /> {member.role}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
       ) : (
-        <p className="muted small">Loading members…</p>
+        <p className="muted small">Gathering the council…</p>
       )}
       <p className="muted small">
-        Add, edit or remove members on the <a href="#/members">Members</a> page. Every number on the
-        Analytics page is calculated by the Week 4 engine from what was actually said.
+        Swap the members out on the <a href="#/members">Members</a> page. Every number the
+        Analytics page shows is measured by the Week 4 engine from what was actually said — nothing
+        on this site is decorative.
       </p>
     </section>
   );
@@ -142,7 +169,12 @@ export function AnalyticsPage({ run }) {
     return (
       <section className="panel">
         <h2>Analytics</h2>
-        <Empty label="Charts appear after the first round finishes." />
+        <Empty
+          label={
+            'Measured charts appear once the first round finishes. The Debate page has a live ' +
+            'view of the positions in the meantime.'
+          }
+        />
       </section>
     );
   }
@@ -150,21 +182,31 @@ export function AnalyticsPage({ run }) {
   return (
     <div className="grid-2">
       <section className="panel">
-        <h2>Opinion trajectory</h2>
+        <h2>
+          <TrendingUp size={17} aria-hidden="true" /> Opinion trajectory
+        </h2>
         <OpinionTrajectory analytics={run.analytics} />
-        <p className="muted small">Stance: −2 strongly against, +2 strongly for.</p>
+        <p className="muted small chart-note">
+          Stance runs from −2, strongly against, to +2, strongly for.
+        </p>
       </section>
       <section className="panel">
-        <h2>Agreement per round</h2>
+        <h2>
+          <Handshake size={17} aria-hidden="true" /> Agreement per round
+        </h2>
         <AgreementTrend analytics={run.analytics} />
-        <p className="muted small">1.00 means everyone holds the same position.</p>
+        <p className="muted small chart-note">1.00 means everyone holds the same position.</p>
       </section>
       <section className="panel">
-        <h2>Influence</h2>
+        <h2>
+          <Radio size={17} aria-hidden="true" /> Influence
+        </h2>
         <InfluenceRanking analytics={run.analytics} />
       </section>
       <section className="panel">
-        <h2>Sentiment</h2>
+        <h2>
+          <Smile size={17} aria-hidden="true" /> Sentiment
+        </h2>
         <SentimentPanel analytics={run.analytics} messages={run.messages} />
       </section>
 
@@ -211,7 +253,7 @@ export function RecordPage({ run, charts }) {
     return (
       <section className="panel">
         <h2>Report</h2>
-        <Empty label="The report is ready when the debate finishes." />
+        <Empty label="The written report is ready the moment the council finishes." />
       </section>
     );
   }
@@ -229,7 +271,9 @@ export function RecordPage({ run, charts }) {
     <div className="record">
       <div className="grid-2">
         <section className="panel">
-          <h2>Opinion trajectory</h2>
+          <h2>
+            <LineChart size={17} aria-hidden="true" /> Opinion trajectory
+          </h2>
           {charts?.opinion_trajectory_png ? (
             <img alt="Opinion trajectory chart" src={`data:image/png;base64,${charts.opinion_trajectory_png}`} />
           ) : (
@@ -303,8 +347,13 @@ export function ArchivePage({ onOpen, currentRunId }) {
   }, []);
 
   if (error) return <section className="panel warn">Could not load the archive: {error}</section>;
-  if (!runs) return <section className="panel"><Empty label="Loading past debates…" /></section>;
-  if (!runs.length) return <section className="panel"><Empty label="No debates on record yet." /></section>;
+  if (!runs) return <section className="panel"><Empty label="Looking up past sessions…" /></section>;
+  if (!runs.length)
+    return (
+      <section className="panel">
+        <Empty label="No debates on record yet — start one and it will be kept here." />
+      </section>
+    );
 
   return (
     <section className="panel">

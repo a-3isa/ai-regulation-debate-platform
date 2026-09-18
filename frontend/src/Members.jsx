@@ -10,7 +10,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, Pencil, Plus, RotateCcw, Trash2, UserPlus, X } from 'lucide-react';
 
-import { agentColor, prettyName } from './Analytics.jsx';
+import { useAgentColors } from './AgentColorContext.jsx';
+import { prettyName } from './Analytics.jsx';
 import {
   createPersona,
   deletePersona,
@@ -45,6 +46,11 @@ function initialsOf(name) {
 }
 
 export function MembersPage({ debating }) {
+  // Colour comes from the shared registry, keyed on the member id - so the
+  // colour beside a member's name here is the colour of its line in every
+  // chart, and stays that colour when another member is added above it in the
+  // list. It used to be the member's index in this array.
+  const { colorFor } = useAgentColors();
   const [members, setMembers] = useState(null);
   const [vocab, setVocab] = useState(null);
   const [error, setError] = useState(null);
@@ -186,10 +192,10 @@ export function MembersPage({ debating }) {
       </section>
 
       <div className="member-grid">
-        {members.map((member, index) => (
-          <article key={member.id} className="panel member-tile" style={{ '--who': agentColor(index) }}>
+        {members.map((member) => (
+          <article key={member.id} className="panel member-tile" style={{ '--who': colorFor(member.id) }}>
             <header className="member-tile-head">
-              <span className="seat" style={{ borderColor: agentColor(index), color: agentColor(index) }}>
+              <span className="seat" style={{ color: colorFor(member.id) }}>
                 {initialsOf(member.name)}
               </span>
               <div>

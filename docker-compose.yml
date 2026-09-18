@@ -1,21 +1,52 @@
-# Live debate platform: Week 4 analytics, the Week 3 debate engine, and the UI.
+# The whole course in one stack: Week 1 retrieval, Week 2 personas, Week 3
+# debate, Week 4 analytics, and the dashboard in front of them.
 #
-#   cp .env.example .env    # fill in the keys
-#   docker compose up -d --build
+#   cp .env.example .env            # fill in the keys
+#   make up                         # or: docker compose up -d --build
 #
-# Routing assumes an existing Traefik with the Docker provider and an ACME
-# resolver (the labels are inert without it). Behind Traefik:
-#   https://$PUBLIC_HOST/          -> ui
-#   https://$PUBLIC_HOST/api/      -> debate service
-#   https://$PUBLIC_HOST/analytics/ -> Week 4 analytics service
+# WHAT "PULLS EVERY WEEK" MEANS HERE
+# Nothing in this repository contains a second copy of any week's code. Each
+# service's Dockerfile clones its week from GitHub at a ref pinned in .env, and
+# `make refs` prints what every running container was built from:
 #
-# The analytics service is built from its own repository at a pinned ref, so
-# this repo never holds a second copy of Week 4's code.
+#   week 1  knowledge  cloned by services/knowledge/Dockerfile
+#   week 2  (inside week 3 at src/vendor/week2; WEEK2_OVERLAY=1 to override)
+#   week 3  debate     cloned by services/debate/Dockerfile
+#   week 4  analytics  cloned by services/analytics/Dockerfile
+#
+# Every one of those repositories is private, so the Docker daemon needs a
+# credential to read them. Export a token and compose passes it to the builds
+# as a BuildKit secret, never as a build arg and never into a layer:
+#
+#   export GIT_TOKEN=ghp_...
+#   make up
+#
+# Once the repositories are public, drop the token and nothing else changes.
+#
+# ROUTING
+# Behind an existing Traefik with the Docker provider and an ACME resolver (the
+# labels are inert without one):
+#   https://$PUBLIC_HOST/            -> ui
+#   https://$PUBLIC_HOST/api/        -> debate service
+#   https://$PUBLIC_HOST/analytics/  -> Week 4 analytics service
+#   https://$PUBLIC_HOST/knowledge/  -> Week 1 retrieval service
+# For a laptop, use the local overlay instead, which publishes plain ports:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+
+x-git-secret: &git-secret
+  - git_token
 
 services:
+  # --- Week 4: analytics engine -------------------------------------------
   analytics:
     build:
-      context: ${ANALYTICS_REPO:-https://github.com/YaassminSalahEldin/Analytics-Intelligence-Layer.git#fix/week4-review-followups}
+      context: .
+      dockerfile: services/analytics/Dockerfile
+      secrets: *git-secret
+      args:
+        WEEK4_REPO: ${WEEK4_REPO:-https://github.com/YaassminSalahEldin/Analytics-Intelligence-Layer.git}
+        WEEK4_BRANCH: ${WEEK4_BRANCH:-week5/production-followups}
+        WEEK4_REF: ${WEEK4_REF:-cc8d2d225be173cce6c148e548070c44aaeedf05}
     image: analytics-api:latest
     restart: unless-stopped
     environment:
@@ -35,26 +66,38 @@ services:
       traefik.http.middlewares.analytics-strip.stripprefix.prefixes: /analytics
       traefik.http.services.analytics.loadbalancer.server.port: "8000"
 
-  # Week 1 knowledge base, self-hosted instead of Vercel. Opt-in:
-  #   docker compose --profile selfhosted-week1 up -d --build
-  # then point the debate service at it with
-  #   WEEK1_RETRIEVAL_URL=http://knowledge:8200
-  # It needs the pgvector database that holds the embedded corpus, and the same
-  # embedding model the corpus was built with.
+  # --- Week 1: knowledge base ---------------------------------------------
+  #
+  # Runs as part of the default stack, so `make up` really does start every
+  # week. What it is USED FOR is a separate decision: the debate service calls
+  # whatever WEEK1_RETRIEVAL_URL points at, which defaults to the hosted
+  # deployment. Point it at http://knowledge:8200 to serve retrieval from here.
+  #
+  # It needs a Postgres/pgvector database holding the embedded corpus. The `db`
+  # service below provides the server; the corpus itself is Week 1's to ingest,
+  # and until it has been, searches answer with an error naming what is
+  # missing rather than pretending to have results.
   knowledge:
     build:
       context: .
       dockerfile: services/knowledge/Dockerfile
+      secrets: *git-secret
+      args:
+        WEEK1_REPO: ${WEEK1_REPO:-https://github.com/a-3isa/week1-ai-regulation-pipeline.git}
+        WEEK1_BRANCH: ${WEEK1_BRANCH:-week1-ai-regulation-pipeline}
+        WEEK1_REF: ${WEEK1_REF:-d8e6637e8dbfeee809152d6133292a54538a8188}
     image: knowledge-api:latest
     restart: unless-stopped
-    profiles: ["selfhosted-week1"]
     environment:
-      DATABASE_URL: ${WEEK1_DATABASE_URL:-}
+      DATABASE_URL: ${WEEK1_DATABASE_URL:-postgresql://week1:week1@db:5432/week1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       API_KEY: ${WEEK1_API_KEY:-}
       EMBEDDING_MODEL: ${WEEK1_EMBEDDING_MODEL:-text-embedding-3-large}
-      EMBEDDING_DIMENSIONS: ${WEEK1_EMBEDDING_DIMENSIONS:-2000}
+      EMBEDDING_DIMENSIONS: ${WEEK1_EMBEDDING_DIMENSIONS:-512}
       RETRIEVAL_TOP_K: ${WEEK1_TOP_K:-5}
+    depends_on:
+      db:
+        condition: service_healthy
     networks: [platform, edge]
     labels:
       traefik.enable: "true"
@@ -66,10 +109,43 @@ services:
       traefik.http.middlewares.knowledge-strip.stripprefix.prefixes: /knowledge
       traefik.http.services.knowledge.loadbalancer.server.port: "8200"
 
+  # Postgres with pgvector, for the Week 1 corpus. Not exposed to `edge`: only
+  # the knowledge service talks to it.
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-week1}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-week1}
+      POSTGRES_DB: ${POSTGRES_DB:-week1}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the vector extension on an empty data directory. Ignored once
+      # the volume exists, which is why it is idempotent.
+      - ./services/knowledge/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-week1} -d ${POSTGRES_DB:-week1}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [platform]
+
+  # --- Week 3 (+ Week 2 inside it): the debate engine ---------------------
   debate:
     build:
       context: .
       dockerfile: services/debate/Dockerfile
+      secrets: *git-secret
+      args:
+        WEEK3_REPO: ${WEEK3_REPO:-https://github.com/a-3isa/Multi-Agent-Collaboration-AI-Regulation-Team_A.git}
+        WEEK3_BRANCH: ${WEEK3_BRANCH:-week3-task-scaffold}
+        WEEK3_REF: ${WEEK3_REF:-93af9b3cb2219351cc888cf97f5769b71889eb3b}
+        # Week 2 ships inside Week 3; set WEEK2_OVERLAY=1 to run a different one.
+        WEEK2_OVERLAY: ${WEEK2_OVERLAY:-0}
+        WEEK2_REPO: ${WEEK2_REPO:-https://github.com/a-3isa/Intelligent-Agent-Framework.git}
+        WEEK2_BRANCH: ${WEEK2_BRANCH:-main}
+        WEEK2_REF: ${WEEK2_REF:-}
     image: debate-api:latest
     restart: unless-stopped
     depends_on: [analytics]
@@ -84,8 +160,14 @@ services:
       # Week 2 LLM provider (agent turns). Without a key every turn falls back
       # to a stub and the UI says so.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-meta-llama/llama-3.3-70b-instruct}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-2.5-flash}
       AGENT_LLM_STUB: ${AGENT_LLM_STUB:-0}
+      # --- latency ---
+      # Opening positions are independent, so they are generated concurrently.
+      DEBATE_SEED_CONCURRENCY: ${DEBATE_SEED_CONCURRENCY:-4}
+      # Turns inside a round are NOT independent; 1 trades depth for speed.
+      DEBATE_PARALLEL_TURNS: ${DEBATE_PARALLEL_TURNS:-0}
+      DEBATE_SAVE_INTERVAL: ${DEBATE_SAVE_INTERVAL:-2.0}
       # Week 1 knowledge base (retrieval during the debate).
       WEEK1_RETRIEVAL_URL: ${WEEK1_RETRIEVAL_URL:-https://ai-regulation-rag.vercel.app}
       WEEK1_API_KEY: ${WEEK1_API_KEY:-}
@@ -112,6 +194,7 @@ services:
       # SSE: never buffer, and allow a long-lived response while agents think.
       traefik.http.services.debate.loadbalancer.responseforwarding.flushinterval: 100ms
 
+  # --- the dashboard ------------------------------------------------------
   ui:
     build:
       context: .
@@ -132,11 +215,19 @@ services:
       traefik.http.routers.ui.priority: "1"   # lowest: /api and /analytics win
       traefik.http.services.ui.loadbalancer.server.port: "80"
 
+# The GitHub token the week clones use. `environment` rather than `file` so it
+# never has to be written to disk; compose reads GIT_TOKEN from the shell or
+# .env and hands it to BuildKit for the one RUN that needs it.
+secrets:
+  git_token:
+    environment: GIT_TOKEN
+
 volumes:
   discussions:
   agent_memory:
   runs:
   personas:
+  pgdata:
 
 networks:
   platform:

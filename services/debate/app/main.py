@@ -28,14 +28,34 @@ reports - not a second implementation that could drift.
 A debate runs in a worker thread because Week 3's turn logic is synchronous and
 network-bound (LLM + retrieval calls). One thread per active run, capped by
 DEBATE_MAX_CONCURRENT_RUNS.
+
+TWO THINGS THAT USED TO SIT IN THE DEBATE'S WAY
+-----------------------------------------------
+Both of these were latency the user waited through for no reason.
+
+1. THE PER-ROUND ANALYTICS CALL BLOCKED THE NEXT ROUND. `on_round` is invoked
+   from inside the debate loop, and it POSTed the whole discussion to the Week 4
+   service and waited - up to its 120-second timeout - before round N+1 could
+   start. Nothing in the debate depends on the answer: the analytics are for the
+   dashboard, and they arrive on the stream whenever they are ready. So the call
+   now happens on a small background pool and the loop returns immediately.
+
+2. EVERY MESSAGE REWROTE THE WHOLE RUN. `save()` serialises the entire event
+   log, and it ran on every persisted event - so a debate with N events did
+   O(N^2) work in JSON, on the debate thread, growing as the debate went on. The
+   writes are now coalesced by `_SaveScheduler`, which is the same durability
+   guarantee (nothing is lost that was not already at risk) at a bounded cost,
+   with terminal events still written synchronously.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -47,7 +67,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.runner import MAX_ROUNDS, RunConfig, run_debate
+from app.saving import SaveScheduler
+from app.runner import (
+    MAX_ROUNDS,
+    PARALLEL_TURNS,
+    SEED_CONCURRENCY,
+    RunConfig,
+    run_debate,
+)
 from app.personas import build_router as build_persona_router
 
 try:  # Week 3's own JSON conversion, so a record from this service and one
@@ -68,6 +95,20 @@ except Exception:  # pragma: no cover - fallback if Week 3 renames it
 
 ANALYTICS_URL = os.environ.get("ANALYTICS_URL", "http://analytics:8000").rstrip("/")
 MAX_CONCURRENT_RUNS = int(os.environ.get("DEBATE_MAX_CONCURRENT_RUNS", "2"))
+
+#: Shortest gap between two writes of the same run, in seconds. A debate emits
+#: an event every few seconds at most, and each write serialises the whole event
+#: log, so coalescing at this interval turns O(events^2) of JSON into a bounded
+#: trickle. What is at stake if the process dies inside the window is at most
+#: this many seconds of a record that was never a database in the first place.
+SAVE_INTERVAL_SECONDS = float(os.environ.get("DEBATE_SAVE_INTERVAL", "2.0"))
+
+#: Background workers for the per-round analytics call. Two runs can be in
+#: flight (MAX_CONCURRENT_RUNS) and each wants at most one analytics request at
+#: a time, so this only has to keep up with that.
+_analytics_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(2, MAX_CONCURRENT_RUNS), thread_name_prefix="analytics"
+)
 
 #: Where every run's events and final state are written, so a restart of this
 #: service does not silently erase debates. Must be a mounted volume.
@@ -111,6 +152,12 @@ class Run:
         self.events: list[dict] = []
         self.state: dict = {}
         self.analytics: Optional[dict] = None
+        #: Which round `analytics` came from, so a slow round cannot overwrite a
+        #: later one that already came back.
+        self.analytics_round: int = -1
+        #: Per-round analytics calls still in flight, awaited before the final
+        #: report so the last one cannot land after it.
+        self.pending_analytics: list = []
         self.discussion_id: Optional[str] = None
         self.cancelled = threading.Event()
         # Set by the worker only after its LAST event is appended. The stream
@@ -121,6 +168,7 @@ class Run:
         self.lock = threading.Lock()
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.finished_at: Optional[str] = None
+        self._saver = SaveScheduler(self.save, SAVE_INTERVAL_SECONDS)
 
     #: Event types after which the run is written to disk. Every message is
     #: included: a debate interrupted mid-round should still show what was said.
@@ -128,6 +176,11 @@ class Run:
         {"run_started", "message", "opinion", "round_complete", "analytics",
          "report", "run_complete", "run_failed"}
     )
+
+    #: ...and of those, the ones that must be on disk before the call returns.
+    #: Everything else is coalesced by `_SaveScheduler`; these are the last
+    #: events a run will ever emit, so there is no later write to fold them into.
+    PERSIST_NOW = frozenset({"run_complete", "run_failed", "report"})
 
     def append(self, event_type: str, payload: dict) -> None:
         with self.lock:
@@ -139,8 +192,10 @@ class Run:
                     "data": payload,
                 }
             )
-        if event_type in self.PERSIST_ON:
-            self.save()
+        if event_type in self.PERSIST_NOW:
+            self._saver.flush()
+        elif event_type in self.PERSIST_ON:
+            self._saver.request()
 
     # --- persistence ---------------------------------------------------------
     #
@@ -303,23 +358,45 @@ def _worker(run: Run) -> None:
         run.append(event_type, payload)
 
     def on_round(state: dict, round_number: int) -> None:
+        """Ask Week 4 for this round's metrics WITHOUT making round N+1 wait.
+
+        The debate does not read the answer - the analytics exist for the
+        dashboard, and they reach it over the stream whenever they are ready.
+        Called inline, this blocked the next round for as long as the analytics
+        service took, up to a two-minute timeout, on every round.
+
+        The discussion is serialised here, on the debate thread, deliberately:
+        `state` keeps being mutated by the next round, so a background thread
+        reading it later would serialise a moving target. `to_jsonable` is
+        in-process work measured in milliseconds; the HTTP call it feeds is the
+        part worth moving, and that is what gets handed to the pool.
+        """
         discussion = to_jsonable(state)
-        try:
-            analytics = _post_analytics("/inline/analytics", discussion)
-        except ValueError as exc:
-            run.append(
-                "analytics_unavailable",
-                {"round": round_number, "reason": str(exc)},
-            )
-            return
-        except Exception as exc:  # noqa: BLE001 - analytics must not kill a debate
-            run.append(
-                "analytics_unavailable",
-                {"round": round_number, "reason": f"analytics service unreachable: {exc}"},
-            )
-            return
-        run.analytics = analytics
-        run.append("analytics", {"round": round_number, "analytics": analytics})
+
+        def work() -> None:
+            try:
+                analytics = _post_analytics("/inline/analytics", discussion)
+            except ValueError as exc:
+                run.append(
+                    "analytics_unavailable",
+                    {"round": round_number, "reason": str(exc)},
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - analytics must not kill a debate
+                run.append(
+                    "analytics_unavailable",
+                    {"round": round_number, "reason": f"analytics service unreachable: {exc}"},
+                )
+                return
+            # Rounds are dispatched in order and each run has one worker, but a
+            # slow round N could still land after N+1; keep the newest.
+            with run.lock:
+                if round_number >= run.analytics_round:
+                    run.analytics = analytics
+                    run.analytics_round = round_number
+            run.append("analytics", {"round": round_number, "analytics": analytics})
+
+        run.pending_analytics.append(_analytics_pool.submit(work))
 
     try:
         state = run_debate(run.config, emit, cancelled=run.cancelled, on_round=on_round)
@@ -328,11 +405,17 @@ def _worker(run: Run) -> None:
         run.status = run.state.get("status", "completed")
         run.save()
 
+        # Let any round-level analytics still in flight finish first. They are
+        # older than the final report, so if one landed after it the dashboard
+        # would end up showing round 4's numbers next to the closing report.
+        concurrent.futures.wait(run.pending_analytics, timeout=30.0)
+
         # Final pass: the report and charts are Week 4's, computed once at the
         # end from the finished record.
         try:
             report = _post_analytics("/inline/report", run.state, timeout=180.0)
             run.analytics = report.get("analytics", run.analytics)
+            run.analytics_round = 10**6  # the final word; no round may replace it
             run.append(
                 "report",
                 {"markdown": report.get("markdown", ""), "analytics": run.analytics},
@@ -367,6 +450,23 @@ class StartRunRequest(BaseModel):
 # --- routes ----------------------------------------------------------------
 
 
+@app.on_event("shutdown")
+def _flush_on_shutdown() -> None:
+    """Write every run before the process goes, and stop the analytics pool.
+
+    Saves are coalesced, so without this a redeploy could drop the last couple
+    of seconds of a debate that was about to be marked interrupted anyway - but
+    the events are what the UI replays, and losing them for no reason is worse
+    than a slightly slower shutdown.
+    """
+    for run in list(RUNS.values()):
+        try:
+            run._saver.flush()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            print(f"WARNING: run {run.run_id} not flushed: {exc}")
+    _analytics_pool.shutdown(wait=False, cancel_futures=True)
+
+
 @app.get("/health")
 def health():
     analytics_ok = False
@@ -379,6 +479,11 @@ def health():
         "analytics_reachable": analytics_ok,
         "active_runs": _active_runs(),
         "max_rounds": MAX_ROUNDS,
+        # The latency-relevant configuration, so a deployment can be checked
+        # without shelling into the container.
+        "llm_model": os.environ.get("OPENROUTER_MODEL", "(unset)"),
+        "seed_concurrency": SEED_CONCURRENCY,
+        "parallel_turns": PARALLEL_TURNS,
     }
 
 

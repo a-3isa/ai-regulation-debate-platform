@@ -1,10 +1,13 @@
 # Local development overlay: publish ports directly, no Traefik, no TLS.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#   make up-local
+#   # or: docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 #
 #   UI         http://localhost:5173
 #   debate API http://localhost:8100
 #   analytics  http://localhost:8000
+#   knowledge  http://localhost:8200
+#   postgres   localhost:5432
 
 services:
   analytics:
@@ -12,6 +15,17 @@ services:
       - "8000:8000"
     labels:
       traefik.enable: "false"
+
+  knowledge:
+    ports:
+      - "8200:8200"
+    labels:
+      traefik.enable: "false"
+
+  db:
+    ports:
+      # Published so Week 1's ingestion can load the corpus from the host.
+      - "5432:5432"
 
   debate:
     ports:

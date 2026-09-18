@@ -20,6 +20,31 @@ snapshots for round N are recorded *after* every agent has spoken in round N,
 and `record_interactions` runs after the snapshots exist so it can compare this
 round against the last.
 
+WHERE THE TIME GOES (and what is done about it)
+-----------------------------------------------
+A debate is almost entirely waiting on the network: one or two LLM calls per
+agent per turn, plus retrieval. Three things here follow from that.
+
+1. ROUND 0 RUNS IN PARALLEL. Every agent's opening position is generated
+   independently - `build_entry(persona_id, topic)` reads the same Week 1
+   evidence and talks to no other agent - so N sequential LLM+retrieval waits
+   became one. On a four-member council that is the single biggest saving
+   available, and it costs nothing: the results are recorded in the fixed
+   `agents` order afterwards, so the persisted record is identical to what the
+   sequential version produced.
+
+2. TURNS WITHIN A ROUND STAY SEQUENTIAL BY DEFAULT. They are not independent.
+   `routing.get_context_messages()` gives an agent the previous round in full
+   PLUS this round so far, so the second speaker of a round can answer the
+   first. Running them together would silently change what each agent can read
+   - a different debate, not just a faster one. `DEBATE_PARALLEL_TURNS=1` opts
+   in for anyone who wants the speed and accepts that trade; it is off unless
+   asked for, and the choice is recorded on the discussion either way.
+
+3. EVERY TURN IS TIMED. `turn_complete` carries the seconds that turn took,
+   `round_complete` the round, and `config.timings` the totals - so "we made it
+   faster" is a measurement rather than an impression.
+
 INITIAL OPINIONS
 ----------------
 Week 3 seeds round 0 from Week 2's committed `initial_opinions.json`, which was
@@ -34,10 +59,13 @@ about a different topic.
 
 from __future__ import annotations
 
+import concurrent.futures
+import copy
 import importlib.util
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +101,16 @@ OUTPUT_DIR = Path(os.environ.get("DEBATE_OUTPUT_DIR", "/data/discussions"))
 #: Hard ceiling on rounds a caller may request, so one request cannot spend an
 #: unbounded number of LLM calls.
 MAX_ROUNDS = int(os.environ.get("DEBATE_MAX_ROUNDS", "8"))
+
+#: How many opening positions to generate at once. Round 0 is embarrassingly
+#: parallel (see the module docstring); the ceiling is here because past the
+#: provider's own concurrency limit the extra requests come back as 429s and the
+#: retry backoff makes the round slower, not faster.
+SEED_CONCURRENCY = max(1, int(os.environ.get("DEBATE_SEED_CONCURRENCY", "4")))
+
+#: Opt-in in-round parallelism. Off by default because it changes what each
+#: agent can read, not only how long the round takes - see the module docstring.
+PARALLEL_TURNS = os.environ.get("DEBATE_PARALLEL_TURNS", "0").strip() == "1"
 
 
 def _load_initial_opinion_builder():
@@ -221,12 +259,48 @@ def _seed_opinions(state: dict, cfg: RunConfig, proposition: str, emit: Emit) ->
         emit("notice", {"message": f"initial-opinion generator unavailable: {exc}"})
 
     if build_entry is not None:
-        for persona_id in agents:
+        # Fetch every opening position at once, then record them in the fixed
+        # `agents` order.
+        #
+        # WHY FETCHING AND RECORDING ARE SPLIT
+        # `record_opinion` mutates the shared discussion state and
+        # `score_opinion_stance` is another network call. Doing either inside a
+        # worker would make the order of `state["opinions"]` depend on which
+        # request finished first, and the persisted record would differ between
+        # otherwise identical runs. So the threads only fetch text - the part
+        # that is purely I/O-bound and independent - and the main thread does
+        # the ordering, the scoring and the emitting exactly as before.
+        def fetch(persona_id):
             try:
                 entry = build_entry(persona_id, cfg.topic)
                 opinion = (entry or {}).get("opinion", "").strip()
                 if not opinion:
                     raise ValueError("generator returned an empty opinion")
+                return persona_id, opinion, None
+            except Exception as exc:  # noqa: BLE001 - reported per agent below
+                return persona_id, None, exc
+
+        started = time.perf_counter()
+        workers = max(1, min(SEED_CONCURRENCY, len(agents)))
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="seed"
+            ) as pool:
+                results = list(pool.map(fetch, agents))
+        else:
+            results = [fetch(persona_id) for persona_id in agents]
+        fetched = {persona_id: (opinion, error) for persona_id, opinion, error in results}
+        elapsed = time.perf_counter() - started
+
+        for persona_id in agents:
+            opinion, error = fetched[persona_id]
+            if opinion is None:
+                emit(
+                    "notice",
+                    {"message": f"could not generate an initial opinion for {persona_id}: {error}"},
+                )
+                continue
+            try:
                 record_opinion(
                     state,
                     persona_id,
@@ -234,22 +308,27 @@ def _seed_opinions(state: dict, cfg: RunConfig, proposition: str, emit: Emit) ->
                     opinion,
                     stance_score=score_opinion_stance(opinion, proposition),
                 )
-                generated += 1
-                emit(
-                    "opinion",
-                    {
-                        "persona_id": persona_id,
-                        "stage": "initial",
-                        "round": 0,
-                        "opinion_text": opinion,
-                        "stance_score": state["opinions"][persona_id][-1].stance_score,
-                    },
-                )
             except Exception as exc:  # noqa: BLE001
                 emit(
                     "notice",
-                    {"message": f"could not generate an initial opinion for {persona_id}: {exc}"},
+                    {"message": f"could not record an initial opinion for {persona_id}: {exc}"},
                 )
+                continue
+            generated += 1
+            emit(
+                "opinion",
+                {
+                    "persona_id": persona_id,
+                    "stage": "initial",
+                    "round": 0,
+                    "opinion_text": opinion,
+                    "stance_score": state["opinions"][persona_id][-1].stance_score,
+                },
+            )
+
+        timings = state.setdefault("config", {}).setdefault("timings", {})
+        timings["seed_seconds"] = round(elapsed, 2)
+        timings["seed_concurrency"] = workers
 
     if generated == len(agents):
         state.setdefault("config", {}).setdefault("initial_opinions", {})["source"] = (
@@ -343,6 +422,187 @@ def _ensure_baseline_stances(state: dict, emit: Emit) -> None:
     )
 
 
+def _emit_retrieval(event, emit: Emit) -> None:
+    emit(
+        "retrieval",
+        {
+            "persona_id": event.persona_id,
+            "round": event.round,
+            "query": event.query,
+            "trigger": event.trigger,
+            "source": event.source,
+            "result_count": len(event.results or []),
+            "documents": [
+                {
+                    "doc_id": hit.get("doc_id"),
+                    "url": hit.get("url"),
+                    "title": hit.get("title") or hit.get("doc_id"),
+                }
+                for hit in (event.results or [])[:5]
+            ],
+        },
+    )
+
+
+def _emit_message(message, emit: Emit) -> None:
+    emit(
+        "message",
+        {
+            "message_id": message.message_id,
+            "round": message.round,
+            "sender": message.sender,
+            "recipients": message.recipients,
+            "content": message.content,
+            "timestamp": message.timestamp,
+            "used_retrieval": message.used_retrieval,
+        },
+    )
+
+
+def _emit_turn_complete(round_number: int, persona_id: str, started: float, failed: bool,
+                        emit: Emit) -> None:
+    """Per-turn wall clock, so a latency change is measurable from the stream."""
+    emit(
+        "turn_complete",
+        {
+            "round": round_number,
+            "persona_id": persona_id,
+            "seconds": round(time.perf_counter() - started, 2),
+            "failed": failed,
+        },
+    )
+
+
+def _run_round_in_order(
+    state: dict,
+    agents: list[str],
+    round_number: int,
+    emit: Emit,
+    cancelled: Optional[threading.Event],
+) -> None:
+    """One round, one agent at a time - the default.
+
+    Sequential because the turns are not independent: an agent reads this round
+    so far as well as the last one, so the second speaker can answer the first.
+    """
+    for persona_id in agents:
+        if cancelled is not None and cancelled.is_set():
+            break
+
+        messages_before = len(state.get("messages", []))
+        retrievals_before = len(state.get("retrieval_events", []))
+        emit("turn_started", {"round": round_number, "persona_id": persona_id})
+        started = time.perf_counter()
+
+        try:
+            # `run_turn` returns the same mapping it was handed, mutated in
+            # place; `state` is rebound only so a future version that copies
+            # still works.
+            updated = run_turn(state, persona_id)
+            if updated is not state:
+                state.update(updated)
+        except Exception as exc:  # noqa: BLE001 - one bad turn must not kill the run
+            state.setdefault("failed_turns", []).append(
+                {"agent": persona_id, "round": round_number, "error": str(exc)}
+            )
+            emit("notice", {"message": f"{persona_id}'s turn failed: {exc}"})
+            _emit_turn_complete(round_number, persona_id, started, True, emit)
+            continue
+
+        for event in state.get("retrieval_events", [])[retrievals_before:]:
+            _emit_retrieval(event, emit)
+        for message in state.get("messages", [])[messages_before:]:
+            _emit_message(message, emit)
+        _emit_turn_complete(round_number, persona_id, started, False, emit)
+
+
+def _run_round_in_parallel(
+    state: dict,
+    agents: list[str],
+    round_number: int,
+    emit: Emit,
+    cancelled: Optional[threading.Event],
+) -> None:
+    """One round, every agent at once. Opt-in via `DEBATE_PARALLEL_TURNS=1`.
+
+    THE TRADE, STATED PLAINLY
+    Every agent sees the discussion as it was at the START of the round, so
+    nobody can answer anybody else's turn from the same round. That is a
+    different debate from the sequential one - shallower, because the
+    within-round back-and-forth is gone - in exchange for finishing in roughly
+    the time of one turn instead of N. Which of those matters is the operator's
+    call, not this module's, and `config.parallel_turns` records which one ran.
+
+    HOW IT IS MADE SAFE
+    `run_turn` does a read-modify-write over the whole discussion state, so
+    calling it on the shared dict from several threads would interleave those
+    writes. Holding a lock around the call instead would serialise the model
+    calls - the one thing this function exists to overlap - and buy nothing at
+    all.
+
+    So each thread gets its own deep copy of the state, mutates only that, and
+    the messages and retrieval events it produced are merged back into the real
+    state afterwards IN `agents` ORDER. Two consequences worth knowing:
+
+      * the merge is deterministic. The transcript does not depend on which
+        request happened to finish first, so the same round run twice produces
+        the same record - which matters, because Week 4 reads that record;
+      * a deep copy per agent per round costs microseconds against a
+        multi-second model call, which is the only reason it is affordable.
+
+    Agent memory is written per persona, under its own directory, so the copies
+    do not race there either.
+    """
+    messages_before = len(state.get("messages", []))
+    retrievals_before = len(state.get("retrieval_events", []))
+
+    lock = threading.Lock()
+    produced: dict[str, tuple[list, list]] = {}
+    failures: dict[str, Exception] = {}
+
+    def turn(persona_id: str) -> None:
+        if cancelled is not None and cancelled.is_set():
+            return
+        emit("turn_started", {"round": round_number, "persona_id": persona_id})
+        started = time.perf_counter()
+        try:
+            local = copy.deepcopy(state)
+            local = run_turn(local, persona_id) or local
+        except Exception as exc:  # noqa: BLE001 - one bad turn must not kill the run
+            with lock:
+                failures[persona_id] = exc
+            _emit_turn_complete(round_number, persona_id, started, True, emit)
+            return
+        with lock:
+            produced[persona_id] = (
+                local.get("messages", [])[messages_before:],
+                local.get("retrieval_events", [])[retrievals_before:],
+            )
+        _emit_turn_complete(round_number, persona_id, started, False, emit)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(agents)), thread_name_prefix=f"round{round_number}"
+    ) as pool:
+        list(pool.map(turn, agents))
+
+    # Merge in the fixed agent order, never in completion order.
+    for persona_id in agents:
+        if persona_id in failures:
+            exc = failures[persona_id]
+            state.setdefault("failed_turns", []).append(
+                {"agent": persona_id, "round": round_number, "error": str(exc)}
+            )
+            emit("notice", {"message": f"{persona_id}'s turn failed: {exc}"})
+            continue
+        messages, retrievals = produced.get(persona_id, ([], []))
+        state.setdefault("retrieval_events", []).extend(retrievals)
+        state.setdefault("messages", []).extend(messages)
+        for event in retrievals:
+            _emit_retrieval(event, emit)
+        for message in messages:
+            _emit_message(message, emit)
+
+
 def run_debate(
     cfg: RunConfig,
     emit: Emit,
@@ -369,6 +629,7 @@ def run_debate(
     Returns the final discussion state.
     """
     cfg = cfg.validated()
+    run_started_at = time.perf_counter()
 
     # Always pass the member list explicitly. Week 3's graph_config(None) falls
     # back to DEFAULT_AGENTS, which is computed once at import - so a member
@@ -406,6 +667,10 @@ def run_debate(
             "turn_order": agents,
             "stakeholder_tags": graph.get("stakeholder_tags", {}),
             "llm_model": os.environ.get("OPENROUTER_MODEL", "(unset)"),
+            # On the record: both change what the run costs in time, and the
+            # second changes what each agent was able to read.
+            "seed_concurrency": SEED_CONCURRENCY,
+            "parallel_turns": PARALLEL_TURNS,
             "llm_stubbed": week3_config.llm_is_stubbed(),
             "retrieval_url": os.environ.get("WEEK1_RETRIEVAL_URL", ""),
             "retrieval_key_present": bool(os.environ.get("WEEK1_API_KEY", "").strip()),
@@ -438,59 +703,13 @@ def run_debate(
             break
 
         state["current_round"] = round_number
+        round_started_at = time.perf_counter()
         emit("round_started", {"round": round_number})
 
-        for persona_id in agents:
-            if cancelled is not None and cancelled.is_set():
-                break
-
-            messages_before = len(state.get("messages", []))
-            retrievals_before = len(state.get("retrieval_events", []))
-            emit("turn_started", {"round": round_number, "persona_id": persona_id})
-
-            try:
-                state = run_turn(state, persona_id)
-            except Exception as exc:  # noqa: BLE001 - one bad turn must not kill the run
-                state.setdefault("failed_turns", []).append(
-                    {"agent": persona_id, "round": round_number, "error": str(exc)}
-                )
-                emit("notice", {"message": f"{persona_id}'s turn failed: {exc}"})
-                continue
-
-            for event in state.get("retrieval_events", [])[retrievals_before:]:
-                emit(
-                    "retrieval",
-                    {
-                        "persona_id": event.persona_id,
-                        "round": event.round,
-                        "query": event.query,
-                        "trigger": event.trigger,
-                        "source": event.source,
-                        "result_count": len(event.results or []),
-                        "documents": [
-                            {
-                                "doc_id": hit.get("doc_id"),
-                                "url": hit.get("url"),
-                                "title": hit.get("title") or hit.get("doc_id"),
-                            }
-                            for hit in (event.results or [])[:5]
-                        ],
-                    },
-                )
-
-            for message in state.get("messages", [])[messages_before:]:
-                emit(
-                    "message",
-                    {
-                        "message_id": message.message_id,
-                        "round": message.round,
-                        "sender": message.sender,
-                        "recipients": message.recipients,
-                        "content": message.content,
-                        "timestamp": message.timestamp,
-                        "used_retrieval": message.used_retrieval,
-                    },
-                )
+        if PARALLEL_TURNS:
+            _run_round_in_parallel(state, agents, round_number, emit, cancelled)
+        else:
+            _run_round_in_order(state, agents, round_number, emit, cancelled)
 
         record_round_opinions(state, round_number)
         record_interactions(state, round_number)
@@ -522,12 +741,17 @@ def run_debate(
             and round_number < cfg.num_rounds
             and discussion_converged(state)
         )
+        round_seconds = round(time.perf_counter() - round_started_at, 2)
+        state.setdefault("config", {}).setdefault("timings", {}).setdefault("rounds", {})[
+            str(round_number)
+        ] = round_seconds
         emit(
             "round_complete",
             {
                 "round": round_number,
                 "converged": converged,
                 "average_movement": average_movement(state),
+                "seconds": round_seconds,
             },
         )
 
@@ -540,6 +764,9 @@ def run_debate(
     if state.get("status") not in ("converged", "cancelled"):
         state["status"] = "completed"
     state.setdefault("config", {})["finished_at"] = _now()
+    state["config"].setdefault("timings", {})["total_seconds"] = round(
+        time.perf_counter() - run_started_at, 2
+    )
 
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

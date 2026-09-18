@@ -7,3 +7,8 @@ node_modules/
 dist/
 data/
 stream*.txt
+
+# Visual-check scratch: the fixture and API stub Playwright injects into dist/.
+# dist/ is already ignored; these are the copies kept next to the repo root.
+fixture.json
+harness.js
