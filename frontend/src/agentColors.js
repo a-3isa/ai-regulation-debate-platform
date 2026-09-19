@@ -1,48 +1,60 @@
-// One colour per member, the same colour in every chart on every page.
+// One member, one identity — the same colour and the same dash in every chart,
+// on every page, and in the PNGs the report exports.
 //
 // WHY THIS FILE EXISTS
 // Colour used to be `agentColor(index)`, where `index` was whatever position a
-// member happened to occupy in whatever array the component was mapping over.
-// Those arrays are not the same array:
+// member happened to occupy in whatever array the component was mapping. Those
+// are different arrays: the trajectory used the analytics keys, the influence
+// ranking re-sorted by SCORE, the transcript used turn order, the members page
+// used the persona list. So the EU regulator was blue in one chart and amber in
+// the next, and a reader comparing two charts of the same debate was misled.
 //
-//   OpinionTrajectory   Object.keys(analytics.opinion_change)
-//   InfluenceRanking    the same members, re-sorted by SCORE
-//   ChamberRing/Floor   run.meta.agents, in turn order
-//   Members / seat      the persona list from the API
+// The fix is to key identity on the member id:
 //
-// So the EU regulator was blue in the trajectory, amber in the influence
-// ranking, and teal on the members page - and a reader comparing two charts of
-// the same debate was quietly misled about which line was whose.
+//   identity(id) = PALETTE[ sorted(ids).indexOf(id) % PALETTE.length ]
 //
-// The fix is to key colour on the member id instead of on a position:
+// Sorting is what makes it stable. Every caller resolves through the same
+// registry, so the order a component iterates in stops mattering.
 //
-//   colour(id) = PALETTE[ sorted(ids).indexOf(id) % PALETTE.length ]
-//
-// Sorting is what makes it stable. Every caller resolves colour through the
-// same registry, seeded once from the run's member list, so the order a
-// particular component iterates in stops mattering. An id the registry has
-// never seen - a member removed mid-run, or a chart rendered before the run
-// metadata arrives - falls back to a hash of the id, so it still gets a fixed
-// colour rather than none.
-//
-// PARITY WITH THE REPORT PNGs
-// `src/visualization/palette.py` in the Week 4 analytics repo implements this
-// same mapping over this same palette, so the charts rendered in the browser
-// and the PNGs embedded in the committed report agree. Week 4's
-// tests/test_palette.py reads the hex values out of THIS file and fails if the
-// two lists drift, so change both in one commit.
+// THE SHAPE CHANNEL (why identity is a pair, not a colour)
+// Every hex has to clear 3:1 against both a white matplotlib PNG and the app's
+// dark surface (#16181C). That confines all six to a narrow mid-luminance band,
+// so they are already close together — and at 7+ members the palette wraps and
+// two people share a colour, in a product whose whole premise is per-member
+// identity. So identity carries a second, non-colour channel: a stroke-dash
+// pattern, assigned by the same pure function. It is inert at <=6 members and
+// activates automatically past that. `palette.py` carries the same two lists in
+// the same order, and Week 4's test suite fails if either drifts.
 
-//: Six hues, far apart from each other, every one clearing 3:1 against both a
-//: white PNG canvas and this app's near-black dark surface (WCAG 1.4.11). The
-//: measured ratios are documented in the Python twin. Keep in this order.
+//: Six hexes, every one inside the luminance window 0.126-0.30 — the only band
+//: that clears 3:1 against #FFFFFF (matplotlib PNGs) and against #16181C (app
+//: dark surface). SHARED VERBATIM WITH palette.py. Changing one here is a
+//: two-file change or nothing.
 export const AGENT_PALETTE = [
-  '#1f74e8', // blue
-  '#c77700', // amber
-  '#0d9488', // teal
-  '#db2777', // magenta
-  '#7c5cff', // violet
-  '#22a94a', // green
+  '#3B7DD8', // blue
+  '#0E8F86', // teal
+  '#B5761A', // ochre
+  '#A8459B', // magenta
+  '#4C8B2B', // green
+  '#D1544B', // red
 ];
+
+//: The second identity channel, same ordering and same determinism as the
+//: palette. SVG stroke-dasharray values; `null` is a solid line. Only rendered
+//: once a run has more members than the palette has colours — below that, two
+//: channels for four members is noise pretending to be information.
+export const AGENT_DASHES = [
+  null,
+  '6 3',
+  '2 3',
+  '9 3 2 3',
+  '1 3',
+  '12 4',
+];
+
+//: Past this many members the dash channel turns on, because the colour channel
+//: has run out and started repeating.
+export const SHAPE_CHANNEL_THRESHOLD = AGENT_PALETTE.length;
 
 // FNV-1a, for an id the registry does not know. A plain string-length or
 // charCode sum collides constantly on ids that share a prefix
@@ -58,23 +70,51 @@ function hashIndex(id) {
 }
 
 /**
- * Build a colour registry for one debate.
+ * Build an identity registry for one debate.
  *
- * @param {string[]} ids every member in the discussion. Order is irrelevant -
+ * @param {string[]} ids every member in the discussion. Order is irrelevant —
  *   the registry sorts them, which is what makes two components agree.
- * @returns {{ colorFor: (id: string) => string, map: Record<string,string> }}
  */
 export function createAgentColors(ids) {
   const ordered = [...new Set((ids || []).filter((id) => typeof id === 'string' && id))].sort();
-  const map = {};
+  const shapeOn = ordered.length > SHAPE_CHANNEL_THRESHOLD;
+
+  const colorMap = {};
+  const dashMap = {};
   ordered.forEach((id, index) => {
-    map[id] = AGENT_PALETTE[index % AGENT_PALETTE.length];
+    colorMap[id] = AGENT_PALETTE[index % AGENT_PALETTE.length];
+    // QUOTIENT, not remainder. The colour is `index % PALETTE.length`, so
+    // members 0 and 6 share a colour; if the dash also used the remainder they
+    // would share that too and the second channel would disambiguate nothing.
+    // The quotient makes the (colour, dash) PAIR unique.
+    dashMap[id] = shapeOn
+      ? AGENT_DASHES[Math.floor(index / AGENT_PALETTE.length) % AGENT_DASHES.length]
+      : null;
   });
+
+  const indexOf = (id) => {
+    const i = ordered.indexOf(id);
+    return i === -1 ? hashIndex(id || '') : i;
+  };
+
   return {
-    map,
+    map: colorMap,
+    /** True when colour alone can no longer tell every member apart. */
+    shapeChannelActive: shapeOn,
     colorFor(id) {
       if (!id) return AGENT_PALETTE[0];
-      return map[id] || AGENT_PALETTE[hashIndex(id)];
+      return colorMap[id] || AGENT_PALETTE[hashIndex(id)];
+    },
+    /** SVG stroke-dasharray for this member, or null for a solid stroke. */
+    dashFor(id) {
+      if (!id || !shapeOn) return null;
+      if (dashMap[id] !== undefined) return dashMap[id];
+      const i = indexOf(id);
+      return AGENT_DASHES[Math.floor(i / AGENT_PALETTE.length) % AGENT_DASHES.length];
+    },
+    /** A tinted surface derived from the member's colour, for avatar fills. */
+    washFor(id) {
+      return `color-mix(in oklab, ${this.colorFor(id)} var(--wash), var(--surface))`;
     },
   };
 }
@@ -87,8 +127,8 @@ export const FALLBACK_AGENT_COLORS = createAgentColors([]);
  *
  * Prefer `useAgentColor()` inside a component: it resolves through the run's
  * registry, which gives distinct colours to every member of a normal council.
- * This function is the escape hatch for code outside the React tree, and its
- * colours can collide when two ids happen to hash to the same slot.
+ * This is the escape hatch for code outside the React tree, and its colours can
+ * collide when two ids happen to hash to the same slot.
  */
 export function agentColorFor(id) {
   return FALLBACK_AGENT_COLORS.colorFor(id);

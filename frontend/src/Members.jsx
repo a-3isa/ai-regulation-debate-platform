@@ -20,7 +20,6 @@ import {
   resetPersonas,
   updatePersona,
 } from './api.js';
-import { RoleIcon } from './Stage.jsx';
 
 const BLANK = {
   name: '',
@@ -103,12 +102,12 @@ export function MembersPage({ debating }) {
   }
 
   if (error && !members) {
-    return <section className="panel warn">Could not load members: {error}</section>;
+    return <section className="banner error">Could not load members: {error}</section>;
   }
   if (!members || !vocab) {
     return (
       <section className="panel">
-        <p className="muted empty">Loading members…</p>
+        <p className="empty">Loading members…</p>
       </section>
     );
   }
@@ -150,17 +149,17 @@ export function MembersPage({ debating }) {
               (confirmReset ? (
                 <span className="confirm-inline" role="alert">
                   Discard all changes and restore the original four?
-                  <button type="button" className="danger small-button" onClick={reset}>
+                  <button type="button" className="btn-danger btn-sm" onClick={reset}>
                     <Check size={14} aria-hidden="true" /> Restore
                   </button>
-                  <button type="button" className="ghost small-button" onClick={() => setConfirmReset(false)}>
+                  <button type="button" className="btn-sm" onClick={() => setConfirmReset(false)}>
                     Cancel
                   </button>
                 </span>
               ) : (
                 <button
                   type="button"
-                  className="ghost"
+                  className=""
                   onClick={() => setConfirmReset(true)}
                   disabled={locked}
                 >
@@ -195,13 +194,12 @@ export function MembersPage({ debating }) {
         {members.map((member) => (
           <article key={member.id} className="panel member-tile" style={{ '--who': colorFor(member.id) }}>
             <header className="member-tile-head">
-              <span className="seat" style={{ color: colorFor(member.id) }}>
+              <span className="seat seat-md" style={{ color: colorFor(member.id) }}>
                 {initialsOf(member.name)}
               </span>
               <div>
                 <h3>{member.name}</h3>
-                <span className="muted small role">
-                  <RoleIcon personaId={member.id} size={12} /> {member.role}
+                <span className="muted small role"> {member.role}
                 </span>
               </div>
             </header>
@@ -228,10 +226,10 @@ export function MembersPage({ debating }) {
               {confirmDelete === member.id ? (
                 <span className="confirm-inline" role="alert">
                   Remove {member.name}?
-                  <button type="button" className="danger small-button" onClick={() => remove(member)}>
+                  <button type="button" className="btn-danger btn-sm" onClick={() => remove(member)}>
                     <Trash2 size={14} aria-hidden="true" /> Remove
                   </button>
-                  <button type="button" className="ghost small-button" onClick={() => setConfirmDelete(null)}>
+                  <button type="button" className="btn-sm" onClick={() => setConfirmDelete(null)}>
                     Cancel
                   </button>
                 </span>
@@ -239,7 +237,7 @@ export function MembersPage({ debating }) {
                 <>
                   <button
                     type="button"
-                    className="ghost small-button"
+                    className="btn-sm"
                     onClick={() => setEditing(member)}
                     disabled={locked}
                   >
@@ -247,7 +245,7 @@ export function MembersPage({ debating }) {
                   </button>
                   <button
                     type="button"
-                    className="ghost small-button"
+                    className="btn-sm"
                     onClick={() => setConfirmDelete(member.id)}
                     disabled={locked || atMinimum}
                     title={atMinimum ? 'A debate needs at least two members' : undefined}
@@ -343,7 +341,7 @@ function PersonaEditor({ initial, members, vocab, onCancel, onSaved }) {
           </p>
         </div>
         <div className="members-actions">
-          <button type="button" className="ghost" onClick={onCancel}>
+          <button type="button" className="" onClick={onCancel}>
             <X size={15} aria-hidden="true" /> Cancel
           </button>
           <button type="submit" disabled={saving}>

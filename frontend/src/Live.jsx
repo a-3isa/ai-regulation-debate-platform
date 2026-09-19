@@ -1,23 +1,21 @@
-// The live side of the debate page: a chart that moves while the council
+// The live side of the debate page: the chart that moves while the council
 // argues, and the small human touches that make waiting on a slow model feel
 // like watching something happen rather than watching a spinner.
 //
 // WHY THIS DOES NOT USE THE ANALYTICS PAYLOAD
 // The Analytics page renders `run.analytics`, which arrives once per round from
 // the Week 4 service. That is the right source for anything quoted as a
-// finding - it is the same engine that writes the committed report. But it is
-// the wrong source for a live chart: it lands a beat after the round, and only
-// if the analytics service is reachable, so the chart would sit still through
-// the whole round and then jump.
+// finding — it is the same engine that writes the committed report. It is the
+// wrong source for a live chart: it lands a beat after the round, and only if
+// the analytics service is reachable, so the chart would sit still through the
+// whole round and then jump.
 //
-// The numbers here come straight off the `opinion` events instead, which the
-// debate service emits the moment each snapshot is recorded. Same stances -
-// `stance_score` is what Week 4's `opinion_change` reads - just earlier and
-// without a second service in the path. Nothing here is presented as a Week 4
-// metric: this is the debate moving, and the Analytics and Report pages remain
-// the place where measured numbers live.
+// The numbers here come straight off the `opinion` events, which the debate
+// service emits the moment each snapshot is recorded. Same stances Week 4
+// reads — just earlier, and without a second service in the path. Nothing here
+// is presented as a Week 4 metric.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   CartesianGrid,
   Line,
@@ -28,33 +26,30 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Activity, Sparkles } from 'lucide-react';
 
 import { useAgentColors } from './AgentColorContext.jsx';
-import { prettyName } from './Analytics.jsx';
-import { displayName } from './Stage.jsx';
+import { fmt, prettyName } from './Analytics.jsx';
+import { displayName, stanceWord } from './Stage.jsx';
 
 // --- live opinion trajectory ----------------------------------------------
 
 /**
  * Stance per member per round, updating as the rounds land.
  *
- * Interactive in the one way that earns its keep here: clicking a member
- * isolates their line. With four members holding near-identical positions -
- * which is common, and is itself the finding - the lines overlap into a single
- * stripe, and being able to pull one out is the difference between a chart you
+ * Interactive in the one way that earns its keep here: tapping a member
+ * isolates their line. Members frequently hold near-identical positions —
+ * which is itself the finding — and the lines then overlap into a single
+ * stripe. Being able to pull one out is the difference between a chart you
  * read and a chart you look at.
  */
 export function LiveTrajectory({ run }) {
-  const { colorFor } = useAgentColors();
+  const { colorFor, dashFor } = useAgentColors();
   const [isolated, setIsolated] = useState(null);
 
   const agents = run.meta?.agents || [];
   const personas = run.personas || {};
 
   const data = useMemo(() => {
-    // Round numbers actually seen, so the x-axis grows with the debate rather
-    // than showing empty space for rounds that have not happened.
     const rounds = new Set();
     agents.forEach((agent) =>
       (run.opinions[agent] || []).forEach((snapshot) => {
@@ -75,43 +70,63 @@ export function LiveTrajectory({ run }) {
 
   if (data.length === 0) {
     return (
-      <p className="muted empty">
-        The council is reading the evidence. Their opening positions will appear here.
+      <p className="empty">
+        The council is reading the evidence. Opening positions land here first.
       </p>
     );
   }
 
   return (
     <>
-      <ResponsiveContainer width="100%" height={200}>
-        <LineChart data={data} margin={{ top: 8, right: 10, bottom: 0, left: -24 }}>
-          <CartesianGrid stroke="var(--grid)" vertical={false} />
+      <div className="chart-legend">
+        {agents.map((agent) => {
+          const on = isolated === agent;
+          return (
+            <button
+              key={agent}
+              type="button"
+              className={isolated && !on ? 'legend-chip dimmed' : 'legend-chip'}
+              aria-pressed={on}
+              onClick={() => setIsolated(on ? null : agent)}
+              title={on ? 'Show everyone again' : `Show only ${displayName(personas, agent)}`}
+            >
+              <span className="sw" style={{ background: colorFor(agent) }} aria-hidden="true" />
+              {displayName(personas, agent).split(' ').slice(-1)[0]}
+            </button>
+          );
+        })}
+      </div>
+
+      <ResponsiveContainer width="100%" height={230}>
+        <LineChart data={data} margin={{ top: 10, right: 10, bottom: 0, left: -24 }}>
+          <CartesianGrid stroke="var(--line)" vertical={false} strokeDasharray="2 4" />
           <XAxis
             dataKey="round"
-            stroke="var(--axis)"
+            stroke="var(--ink-4)"
             tickLine={false}
             axisLine={false}
-            tick={{ fill: 'var(--axis)', fontSize: 10 }}
+            tick={{ fill: 'var(--ink-4)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
           />
           <YAxis
             domain={[-2, 2]}
             ticks={[-2, 0, 2]}
-            stroke="var(--axis)"
+            stroke="var(--ink-4)"
             tickLine={false}
             axisLine={false}
-            tick={{ fill: 'var(--axis)', fontSize: 10 }}
+            tick={{ fill: 'var(--ink-4)', fontSize: 10, fontFamily: 'var(--font-mono)' }}
           />
-          <ReferenceLine y={0} stroke="var(--axis)" strokeDasharray="3 3" />
+          <ReferenceLine y={0} stroke="var(--line-strong)" />
           <Tooltip
             contentStyle={{
               background: 'var(--surface)',
-              border: '1px solid var(--line-strong)',
-              borderRadius: 12,
+              border: 'none',
+              boxShadow: 'var(--e-3)',
+              borderRadius: 'var(--r-2)',
               fontSize: 12,
               padding: '8px 12px',
             }}
             labelFormatter={(round) => `Round ${round}`}
-            formatter={(value, key) => [value.toFixed(2), displayName(personas, key)]}
+            formatter={(value, key) => [fmt(value), displayName(personas, key)]}
           />
           {agents.map((agent) => {
             const dimmed = isolated && isolated !== agent;
@@ -121,61 +136,39 @@ export function LiveTrajectory({ run }) {
                 type="monotone"
                 dataKey={agent}
                 stroke={colorFor(agent)}
-                strokeWidth={isolated === agent ? 3 : 2}
-                strokeOpacity={dimmed ? 0.15 : 1}
-                dot={{ r: 2, strokeWidth: 0, fill: colorFor(agent) }}
-                // New rounds animate in; that movement is the point of the
-                // panel, and it is disabled with the rest under
-                // prefers-reduced-motion by the CSS.
+                strokeDasharray={dashFor(agent) || undefined}
+                strokeWidth={isolated === agent ? 3 : 2.2}
+                strokeOpacity={dimmed ? 0.14 : 1}
+                dot={{ r: 2.5, strokeWidth: 0, fill: colorFor(agent) }}
                 isAnimationActive
-                animationDuration={600}
+                animationDuration={520}
               />
             );
           })}
         </LineChart>
       </ResponsiveContainer>
 
-      <div className="chips live-legend">
-        {agents.map((agent) => {
-          const on = isolated === agent;
-          return (
-            <button
-              key={agent}
-              type="button"
-              className={on ? 'chip-toggle on' : 'chip-toggle'}
-              style={{ '--who': colorFor(agent) }}
-              aria-pressed={on}
-              onClick={() => setIsolated(on ? null : agent)}
-              title={on ? 'Show everyone again' : `Show only ${displayName(personas, agent)}`}
-            >
-              <span className="swatch" style={{ background: colorFor(agent) }} aria-hidden="true" />
-              {displayName(personas, agent).split(' ').slice(-1)[0]}
-            </button>
-          );
-        })}
+      <div className="chart-foot">
+        <span>&minus;2 strongly against · +2 strongly for</span>
+        <span>{isolated ? 'Tap again to show everyone' : 'Tap a name to follow one member'}</span>
       </div>
-      <p className="muted small chart-note">
-        Updated the moment each round lands. Tap a name to follow one member.
-        {isolated && ' Tap again to show everyone.'}
-      </p>
     </>
   );
 }
 
-// --- how far along are we -------------------------------------------------
+// --- progress -------------------------------------------------------------
 
-/** Round progress as dots, so "round 3 of 5" is legible at a glance. */
+/** Round progress as ticks, so "round 3 of 5" is legible at a glance. */
 export function RoundProgress({ current, total, finished }) {
   if (!total) return null;
   const rounds = Array.from({ length: total }, (_, index) => index + 1);
   return (
-    <div className="round-progress" role="img" aria-label={`Round ${current} of ${total}`}>
+    <div className="progress-ticks" role="img" aria-label={`Round ${current} of ${total}`}>
       {rounds.map((round) => (
         <span
           key={round}
-          className={
-            round < current || finished ? 'tick done' : round === current ? 'tick now' : 'tick'
-          }
+          style={{ width: `${Math.max(14, 120 / total)}px` }}
+          className={round < current || finished ? 'done' : round === current ? 'now' : undefined}
         />
       ))}
     </div>
@@ -184,17 +177,17 @@ export function RoundProgress({ current, total, finished }) {
 
 // --- what is happening right now ------------------------------------------
 
-//: Shown while a member is composing. A model can take a minute, and one
-//: frozen line of text for that whole minute reads as a hang; these rotate, so
-//: the page is visibly alive and honest about what it is doing. Each one
-//: describes something the agent genuinely does during a turn.
+//: Shown while a member composes. A model can take a minute, and one frozen
+//: line of text for that whole minute reads as a hang. These rotate, so the
+//: page is visibly alive — and each describes something the agent genuinely
+//: does during a turn, so it stays honest rather than decorative.
 const THINKING = [
   'is reading the room',
   'is weighing the evidence',
-  'is choosing their words',
   'is checking the Act',
-  'is drafting a reply',
+  'is choosing their words',
   'is looking for a precedent',
+  'is drafting a reply',
 ];
 
 export function NowSpeaking({ run }) {
@@ -213,84 +206,121 @@ export function NowSpeaking({ run }) {
 
   if (speaking) {
     return (
-      <p className="now-speaking">
-        <span className="dots" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-        </span>
-        <strong>{displayName(personas, speaking)}</strong> {THINKING[phrase]}…
-      </p>
+      <>
+        <strong>{displayName(personas, speaking)}</strong>
+        <span className="muted"> {THINKING[phrase]}…</span>
+      </>
     );
   }
 
   if (lastMessage) {
     return (
-      <p className="now-speaking quiet">
-        <Activity size={13} aria-hidden="true" />
-        <strong>{displayName(personas, lastMessage.sender)}</strong> just answered{' '}
-        {lastMessage.recipients.map((r) => displayName(personas, r)).join(', ')}.
-      </p>
+      <>
+        <strong>{displayName(personas, lastMessage.sender)}</strong>
+        <span className="muted">
+          {' '}
+          answered {lastMessage.recipients.map((r) => displayName(personas, r)).join(', ')}
+        </span>
+      </>
     );
   }
 
-  return (
-    <p className="now-speaking quiet">
-      <Activity size={13} aria-hidden="true" /> The council is settling in.
-    </p>
-  );
+  return <span className="muted">The council is settling in.</span>;
 }
 
-// --- the closing note -----------------------------------------------------
+// --- the closing band -----------------------------------------------------
 
 /**
- * A plain-language verdict when the debate ends.
+ * The verdict when a run ends.
  *
- * Not a decoration: "converged" and "completed" are two genuinely different
- * outcomes, and the distinction was previously buried in a status chip reading
- * "Finished early". Saying which one happened, in a sentence, is the most
- * useful thing this page can do at the moment it stops moving.
+ * Not decoration: "converged" and "completed" are genuinely different outcomes,
+ * and the difference used to be buried in a status chip reading "Finished
+ * early". Saying which one happened, in a sentence, with the numbers that
+ * justify it, is the most useful thing this page can do at the moment it stops
+ * moving.
  */
-export function ClosingNote({ run }) {
+export function ClosingBand({ run }) {
+  const { colorFor } = useAgentColors();
   const finished = ['completed', 'converged', 'cancelled'].includes(run.status);
   if (!finished) return null;
 
-  const stances = Object.entries(run.opinions)
-    .map(([agent, history]) => history[history.length - 1]?.stance_score)
-    .filter((value) => typeof value === 'number');
+  const personas = run.personas || {};
+  const agents = run.meta?.agents || [];
 
+  const finals = agents
+    .map((agent) => {
+      const history = run.opinions[agent] || [];
+      const first = history[0]?.stance_score;
+      const last = history[history.length - 1]?.stance_score;
+      return typeof last === 'number'
+        ? { agent, first, last, moved: typeof first === 'number' ? last - first : null }
+        : null;
+    })
+    .filter(Boolean);
+
+  const stances = finals.map((f) => f.last);
   const spread = stances.length > 1 ? Math.max(...stances) - Math.min(...stances) : null;
+  const movers = finals.filter((f) => f.moved !== null && Math.abs(f.moved) > 0.01);
+  const biggest = movers.length
+    ? movers.reduce((a, b) => (Math.abs(b.moved) > Math.abs(a.moved) ? b : a))
+    : null;
+
+  const agreement = (run.analytics?.agreement || []).filter((p) => typeof p.score === 'number');
+  const closedAt = agreement.length ? agreement[agreement.length - 1].score : null;
 
   let headline;
-  let detail;
   if (run.status === 'cancelled') {
-    headline = 'Stopped mid-session';
-    detail = 'Everything said up to that point is kept, and the report covers it.';
+    headline = 'Stopped mid-session. Everything said up to that point is kept, and the report covers it.';
   } else if (run.status === 'converged') {
-    headline = 'They found common ground';
-    detail = 'Positions stopped moving, so the session closed before the last round.';
-  } else if (spread !== null && spread < 0.5) {
-    headline = 'They ended up close together';
-    detail = `Less than ${spread.toFixed(2)} of stance separates the whole council.`;
+    headline = 'They ran out of disagreement. Positions stopped moving, so the session closed before the last round.';
+  } else if (!movers.length) {
+    headline = 'Nobody moved. The debate hardened four existing positions rather than changing any of them.';
+  } else if (spread !== null && spread < 0.6) {
+    headline = `They ended up close together — less than ${spread.toFixed(2)} of stance separates the whole council.`;
   } else if (spread !== null && spread > 2.5) {
-    headline = 'They held their ground';
-    detail = `The council finished ${spread.toFixed(2)} apart on the −2 to +2 scale.`;
+    headline = `They held their ground. The council finished ${spread.toFixed(2)} apart on a four-point scale.`;
   } else {
-    headline = 'The session is closed';
-    detail = 'Every round was heard.';
+    headline = 'The session closed with the room partly moved and partly dug in.';
   }
 
   return (
-    <section className="closing-note" role="status">
-      <Sparkles size={17} aria-hidden="true" />
-      <div>
-        <strong>{headline}</strong>
-        <p className="muted small">
-          {detail} The <a href="#/report">report</a> has the closing exchange and the findings.
-        </p>
+    <section className="closing-band" role="status">
+      <div className="verdict">
+        <div className="kicker" style={{ marginBottom: 'var(--s-2)' }}>Where it landed</div>
+        <p>{headline}</p>
+      </div>
+      <div className="final-stats">
+        {biggest && (
+          <div className="final-stat">
+            <div className="v">
+              <span className="sw" style={{ background: colorFor(biggest.agent) }} aria-hidden="true" />
+              {biggest.moved > 0 ? '+' : '−'}
+              {Math.abs(biggest.moved).toFixed(2)}
+            </div>
+            <div className="l">
+              furthest move — {displayName(personas, biggest.agent).split(' ').slice(-1)[0]}
+            </div>
+          </div>
+        )}
+        <div className="final-stat">
+          <div className="v">{movers.length}/{finals.length}</div>
+          <div className="l">members who shifted at all</div>
+        </div>
+        {closedAt !== null && (
+          <div className="final-stat">
+            <div className="v">{closedAt.toFixed(2)}</div>
+            <div className="l">agreement at close</div>
+          </div>
+        )}
+        {spread !== null && (
+          <div className="final-stat">
+            <div className="v">{spread.toFixed(2)}</div>
+            <div className="l">spread across the room</div>
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
-export { prettyName };
+export { prettyName, stanceWord };

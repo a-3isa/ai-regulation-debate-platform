@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..600&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+/* ============================================================
+   FORUM — token system for the AI-policy debate platform.
+   Only variables, resets, focus, keyframes live here.
+   Everything else is inline (component-local) styling.
+   ============================================================ */
+
+:root {
+  /* — neutral ramp (light) — warm paper, not clinical grey — */
+  --paper:        #FBFAF8;
+  --surface:      #FFFFFF;
+  --surface-2:    #F4F2EE;
+  --surface-3:    #EAE7E1;
+  --line:         #E4E0D9;
+  --line-strong:  #CFC9C0;
+  --ink:          #14161A;
+  --ink-2:        #3C424A;
+  --ink-3:        #4A515A;
+  --ink-4:        #5F656B;   /* 4.5:1+ on paper, surface, surface-2, surface-3 and --line */
+  --ink-inverse:  #FBFAF8;
+  --scrim:        rgba(251,250,248,.72);
+
+  /* — semantic (chrome only; never used for agent identity) — */
+  --warn:         #8A5A00;
+  --warn-wash:    #FBF1DC;
+  --danger:       #A32D25;
+  --danger-wash:  #FBEBE9;
+  --ok:           #2F6B3A;
+
+  /* — agent identity palette — SHARED VERBATIM WITH palette.py —
+     Each hex sits in the luminance window 0.126–0.30, so every one
+     clears 3:1 against #FFFFFF (matplotlib PNGs) and against
+     --surface #16181C (app dark). Do not edit one without the other. */
+  --agent-1: #3B7DD8;
+  --agent-2: #0E8F86;
+  --agent-3: #B5761A;
+  --agent-4: #A8459B;
+  --agent-5: #4C8B2B;
+  --agent-6: #D1544B;
+
+  /* washes derive from the identity colour, so they follow the theme */
+  --wash: 12%;
+
+  /* — type — */
+  --font-display: 'Newsreader', Iowan Old Style, Georgia, serif;
+  --font-ui: 'Archivo', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --t-display: clamp(2.3rem, 4.4vw, 3.5rem);
+  --t-h1:      clamp(1.75rem, 2.9vw, 2.35rem);
+  --t-h2:      clamp(1.3rem, 1.9vw, 1.55rem);
+  --t-h3:      1.0625rem;
+  --t-body:    0.9375rem;
+  --t-sm:      0.8125rem;
+  --t-xs:      0.75rem;
+  --t-micro:   0.6875rem;
+
+  /* — space (4pt) — */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px; --s-5: 24px;
+  --s-6: 32px; --s-7: 48px; --s-8: 64px; --s-9: 96px;
+
+  /* — radius — */
+  --r-1: 6px; --r-2: 10px; --r-3: 14px; --r-4: 20px; --r-5: 28px; --r-full: 999px;
+
+  /* — elevation — */
+  --e-0: none;
+  --e-1: 0 0 0 1px var(--line);
+  --e-2: 0 0 0 1px var(--line), 0 1px 2px rgba(20,22,26,.05), 0 4px 10px -6px rgba(20,22,26,.10);
+  --e-3: 0 0 0 1px var(--line), 0 2px 6px rgba(20,22,26,.05), 0 18px 40px -20px rgba(20,22,26,.22);
+  --e-4: 0 0 0 1px var(--line), 0 32px 70px -28px rgba(20,22,26,.30);
+
+  /* — motion — */
+  --dur-1: 120ms; --dur-2: 200ms; --dur-3: 320ms; --dur-4: 560ms; --dur-5: 900ms;
+  --ease-out: cubic-bezier(.2,.8,.24,1);
+  --ease-io:  cubic-bezier(.4,0,.2,1);
+  --ease-spring: cubic-bezier(.34,1.28,.44,1);
+
+  --focus-ring: 0 0 0 2px var(--paper), 0 0 0 4px var(--ink);
+}
+
+[data-theme='dark'] {
+  --paper:        #0E0F12;
+  --surface:      #16181C;
+  --surface-2:    #1D2026;
+  --surface-3:    #262A31;
+  --line:         #2C3037;
+  --line-strong:  #3E444D;
+  --ink:          #F2F1EE;
+  --ink-2:        #C5C9CF;
+  --ink-3:        #ADB4BC;
+  --ink-4:        #959CA4;   /* 4.5:1+ on paper, surface, surface-2, surface-3 */
+  --ink-inverse:  #14161A;
+  --scrim:        rgba(14,15,18,.72);
+
+  --warn:         #E3AA45;
+  --warn-wash:    #2E2513;
+  --danger:       #F08379;
+  --danger-wash:  #331916;
+  --ok:           #6FBF7F;
+
+  --wash: 18%;
+
+  --e-1: 0 0 0 1px var(--line);
+  --e-2: 0 0 0 1px var(--line), 0 2px 8px rgba(0,0,0,.40);
+  --e-3: 0 0 0 1px var(--line), 0 18px 40px -20px rgba(0,0,0,.70);
+  --e-4: 0 0 0 1px var(--line), 0 32px 70px -28px rgba(0,0,0,.80);
+}
+
+html, body { margin: 0; padding: 0; background: var(--paper); }
+body {
+  font-family: var(--font-ui);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+* { box-sizing: border-box; }
+p { text-wrap: pretty; }
+a { color: var(--ink); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { color: var(--agent-1); }
+
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: var(--r-1);
+}
+
+@keyframes fx-breathe { 0%,100% { opacity:.35; transform:scale(.86) } 50% { opacity:1; transform:scale(1) } }
+@keyframes fx-rise    { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:none } }
+@keyframes fx-draw    { from { stroke-dashoffset: 1 } to { stroke-dashoffset: 0 } }
+@keyframes fx-sweep   { from { transform: translateX(-100%) } to { transform: translateX(300%) } }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-1:0ms; --dur-2:0ms; --dur-3:0ms; --dur-4:0ms; --dur-5:0ms; }
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
