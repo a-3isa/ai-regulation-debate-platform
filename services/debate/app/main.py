@@ -29,6 +29,17 @@ A debate runs in a worker thread because Week 3's turn logic is synchronous and
 network-bound (LLM + retrieval calls). One thread per active run, capped by
 DEBATE_MAX_CONCURRENT_RUNS.
 
+WHAT GETS LOGGED
+----------------
+`app.logs` formats one timestamped line per event, with the run id on it:
+startup, every request (method, path, status, duration), every debate created,
+retrieved, cancelled, completed or failed, every analytics/report/chart call,
+and every member edit. Failures log at ERROR, so `docker compose logs debate |
+grep ERROR` is the whole triage story, and `grep run_id=abc123` is one debate
+end to end. `LOG_LEVEL` sets the threshold. uvicorn's own access log is
+silenced in `logs.configure`, because the middleware here logs the same
+requests with more in them.
+
 TWO THINGS THAT USED TO SIT IN THE DEBATE'S WAY
 -----------------------------------------------
 Both of these were latency the user waited through for no reason.
@@ -53,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 import threading
 import time
@@ -62,11 +74,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app import logs
 from app.saving import SaveScheduler
 from app.runner import (
     MAX_ROUNDS,
@@ -118,6 +131,8 @@ RUNS_DIR = Path(os.environ.get("DEBATE_RUNS_DIR", "/data/runs"))
 TERMINAL_STATUSES = ("completed", "converged", "failed", "cancelled", "interrupted")
 _DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
+logs.configure()
+
 app = FastAPI(title="AI Regulation Debate Platform", version="1.0.0")
 
 app.add_middleware(
@@ -131,6 +146,53 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# --- request logging -------------------------------------------------------
+#
+# One line per request, replacing uvicorn's access log (silenced in
+# `logs.configure`) because this one carries the run id and the duration, and a
+# failure logs at ERROR so `grep ERROR` finds it. A request that raises before
+# a response exists is logged too - otherwise the only trace of the request
+# that killed a worker would be the traceback, with no path and no id on it.
+
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    started = time.monotonic()
+    # `run_id` is the identifier worth having on almost every line here, and the
+    # router has not matched yet, so take it off the path.
+    run_id = request.path_params.get("run_id") or _run_id_from_path(request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - log, then let the handler answer
+        logs.error(
+            "request_failed",
+            method=request.method,
+            path=request.url.path,
+            run_id=run_id,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            reason=str(exc),
+        )
+        raise
+    logs.event(
+        "request",
+        logging.ERROR if response.status_code >= 500 else logging.INFO,
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        run_id=run_id,
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    return response
+
+
+def _run_id_from_path(path: str) -> Optional[str]:
+    """`/runs/abc123/stream` -> `abc123`; anything else -> None."""
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2 and parts[0] == "runs":
+        return parts[1]
+    return None
 
 
 # --- run registry ----------------------------------------------------------
@@ -239,7 +301,7 @@ class Run:
             temp.write_text(json.dumps(self.to_record()), encoding="utf-8")
             os.replace(temp, target)
         except Exception as exc:  # noqa: BLE001
-            print(f"WARNING: run {self.run_id} not persisted: {exc}")
+            logs.error("run_not_persisted", run_id=self.run_id, reason=str(exc))
 
     @classmethod
     def from_record(cls, record: dict) -> "Run":
@@ -296,7 +358,7 @@ def _restore_runs() -> None:
         try:
             run = Run.from_record(json.loads(path.read_text(encoding="utf-8")))
         except Exception as exc:  # noqa: BLE001 - one bad file must not block startup
-            print(f"WARNING: could not restore {path.name}: {exc}")
+            logs.error("run_restore_failed", file=path.name, reason=str(exc))
             continue
         if run.status not in TERMINAL_STATUSES:
             run.status = "interrupted"
@@ -314,8 +376,10 @@ def _restore_runs() -> None:
                 }
             )
             run.save()
+            logs.warning("run_interrupted", run_id=run.run_id, events=len(run.events))
         run.complete.set()
         RUNS[run.run_id] = run
+    logs.info("runs_restored", count=len(RUNS), dir=str(RUNS_DIR))
 
 
 _restore_runs()
@@ -374,15 +438,28 @@ def _worker(run: Run) -> None:
         discussion = to_jsonable(state)
 
         def work() -> None:
+            logs.info("analytics_requested", run_id=run.run_id, round=round_number)
             try:
                 analytics = _post_analytics("/inline/analytics", discussion)
             except ValueError as exc:
+                logs.warning(
+                    "analytics_rejected",
+                    run_id=run.run_id,
+                    round=round_number,
+                    reason=str(exc),
+                )
                 run.append(
                     "analytics_unavailable",
                     {"round": round_number, "reason": str(exc)},
                 )
                 return
             except Exception as exc:  # noqa: BLE001 - analytics must not kill a debate
+                logs.error(
+                    "analytics_failed",
+                    run_id=run.run_id,
+                    round=round_number,
+                    reason=str(exc),
+                )
                 run.append(
                     "analytics_unavailable",
                     {"round": round_number, "reason": f"analytics service unreachable: {exc}"},
@@ -421,12 +498,21 @@ def _worker(run: Run) -> None:
                 {"markdown": report.get("markdown", ""), "analytics": run.analytics},
             )
         except Exception as exc:  # noqa: BLE001
+            logs.error("report_failed", run_id=run.run_id, reason=str(exc))
             run.append("notice", {"message": f"final report unavailable: {exc}"})
 
         run.append("run_complete", {"status": run.status, "discussion_id": run.discussion_id})
+        logs.info(
+            "discussion_completed",
+            run_id=run.run_id,
+            status=run.status,
+            discussion_id=run.discussion_id,
+            events=len(run.events),
+        )
     except Exception as exc:  # noqa: BLE001 - the run failed; say so on the stream
         run.status = "failed"
         run.error = str(exc)
+        logs.error("discussion_failed", run_id=run.run_id, reason=str(exc))
         run.append("run_failed", {"error": str(exc)})
     finally:
         run.finished_at = datetime.now(timezone.utc).isoformat()
@@ -450,6 +536,21 @@ class StartRunRequest(BaseModel):
 # --- routes ----------------------------------------------------------------
 
 
+@app.on_event("startup")
+def _log_startup() -> None:
+    """The one line that says what this process is, before any request."""
+    logs.info(
+        "application_started",
+        version=app.version,
+        analytics_url=ANALYTICS_URL,
+        max_rounds=MAX_ROUNDS,
+        max_concurrent_runs=MAX_CONCURRENT_RUNS,
+        llm_model=os.environ.get("OPENROUTER_MODEL", "(unset)"),
+        llm_stubbed=os.environ.get("AGENT_LLM_STUB", "0") == "1",
+        runs_dir=str(RUNS_DIR),
+    )
+
+
 @app.on_event("shutdown")
 def _flush_on_shutdown() -> None:
     """Write every run before the process goes, and stop the analytics pool.
@@ -463,7 +564,7 @@ def _flush_on_shutdown() -> None:
         try:
             run._saver.flush()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
-            print(f"WARNING: run {run.run_id} not flushed: {exc}")
+            logs.error("run_not_flushed", run_id=run.run_id, reason=str(exc))
     _analytics_pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -511,6 +612,14 @@ def start_run(request: StartRunRequest):
     run = Run(uuid.uuid4().hex[:12], config)
     RUNS[run.run_id] = run
 
+    logs.info(
+        "discussion_created",
+        run_id=run.run_id,
+        rounds=config.num_rounds,
+        strategy=config.strategy,
+        agents=len(config.agents) if config.agents else "all",
+        topic=config.topic,
+    )
     threading.Thread(target=_worker, args=(run,), daemon=True, name=f"debate-{run.run_id}").start()
     return {"run_id": run.run_id, "stream": f"/runs/{run.run_id}/stream", **run.summary()}
 
@@ -523,6 +632,7 @@ def list_runs():
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
     run = _get_run(run_id)
+    logs.info("discussion_retrieved", run_id=run_id, status=run.status, events=len(run.events))
     return {**run.summary(), "discussion": run.state or None, "analytics": run.analytics}
 
 
@@ -530,6 +640,7 @@ def get_run(run_id: str):
 def cancel_run(run_id: str):
     run = _get_run(run_id)
     run.cancelled.set()
+    logs.info("discussion_cancel_requested", run_id=run_id, status=run.status)
     return {"run_id": run_id, "cancelling": run.status in ("pending", "running")}
 
 
@@ -538,9 +649,11 @@ def get_report(run_id: str):
     run = _get_run(run_id)
     if not run.state:
         raise HTTPException(status_code=409, detail="The debate has not finished yet.")
+    logs.info("report_requested", run_id=run_id)
     try:
         return _post_analytics("/inline/report", run.state, timeout=180.0)
     except ValueError as exc:
+        logs.warning("report_rejected", run_id=run_id, reason=str(exc))
         raise HTTPException(status_code=422, detail=str(exc))
 
 
@@ -550,9 +663,11 @@ def get_charts(run_id: str):
     run = _get_run(run_id)
     if not run.state:
         raise HTTPException(status_code=409, detail="The debate has not finished yet.")
+    logs.info("charts_requested", run_id=run_id)
     try:
         return _post_analytics("/inline/visualizations", run.state, timeout=180.0)
     except ValueError as exc:
+        logs.warning("charts_rejected", run_id=run_id, reason=str(exc))
         raise HTTPException(status_code=422, detail=str(exc))
 
 
@@ -569,6 +684,7 @@ def get_discussion(run_id: str):
 async def stream(run_id: str):
     """Server-Sent Events for one run, replayed from the beginning."""
     run = _get_run(run_id)
+    logs.info("stream_opened", run_id=run_id, status=run.status, events=len(run.events))
 
     async def event_source():
         sent = 0

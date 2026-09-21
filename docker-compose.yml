@@ -157,6 +157,9 @@ services:
       PERSONA_DEFAULTS_DIR: /week3/personas-defaults
       DEBATE_MAX_ROUNDS: ${DEBATE_MAX_ROUNDS:-8}
       DEBATE_MAX_CONCURRENT_RUNS: ${DEBATE_MAX_CONCURRENT_RUNS:-2}
+      # One timestamped line per request and per debate event; DEBUG adds the
+      # libraries' own chatter.
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Week 2 LLM provider (agent turns). Without a key every turn falls back
       # to a stub and the UI says so.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

@@ -39,6 +39,8 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 
+from app import logs
+
 from src.graph.build_graph import PERSONAS_DIR, persona_stakeholder_tag
 from src.vendor.week2.persona.loader import PersonaConfigError, load_all
 from src.vendor.week2.persona.schema import (
@@ -124,6 +126,7 @@ def build_router(active_runs: Callable[[], int]) -> APIRouter:
         payload["id"] = persona_id
         persona = _validate(payload)
         _write(persona)
+        logs.info("member_created", member_id=persona_id, name=payload.get("name", ""))
         return _describe(persona)
 
     @router.put("/{persona_id}")
@@ -142,6 +145,7 @@ def build_router(active_runs: Callable[[], int]) -> APIRouter:
         payload["id"] = persona_id
         persona = _validate(payload)
         _write(persona)
+        logs.info("member_updated", member_id=persona_id)
         return _describe(persona)
 
     @router.delete("/{persona_id}")
@@ -156,6 +160,7 @@ def build_router(active_runs: Callable[[], int]) -> APIRouter:
                 detail=f"The council needs at least {MIN_MEMBERS} members to hold a debate.",
             )
         (PERSONAS_DIR / f"{persona_id}.yaml").unlink()
+        logs.warning("member_deleted", member_id=persona_id, remaining=len(personas) - 1)
         return {"deleted": persona_id, "remaining": len(personas) - 1}
 
     @router.post("/reset")
@@ -167,7 +172,9 @@ def build_router(active_runs: Callable[[], int]) -> APIRouter:
             existing.unlink()
         for original in DEFAULTS_DIR.glob("*.yaml"):
             shutil.copy2(original, PERSONAS_DIR / original.name)
-        return {"personas": [_describe(p) for p in _load().values()]}
+        restored = _load()
+        logs.warning("members_reset", count=len(restored))
+        return {"personas": [_describe(p) for p in restored.values()]}
 
     return router
 
