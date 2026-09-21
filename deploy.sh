@@ -132,8 +132,29 @@ docker compose exec -T analytics cat /app/SOURCE_REF 2>/dev/null || echo "analyt
 docker compose exec -T debate    cat /SOURCE_REFS   2>/dev/null || echo "debate:    no ref recorded"
 docker compose exec -T knowledge cat /SOURCE_REFS   2>/dev/null || echo "knowledge: no ref recorded"
 
+# `set -e` would otherwise abort here with nothing but a curl exit code, after
+# a deploy that actually succeeded - the stack can be healthy inside Docker
+# while the public name is not resolvable or the certificate is still being
+# issued. Report which of the two it is, and keep the non-zero exit.
 say "Checking the public endpoints"
-curl -fsS "https://$PUBLIC_HOST/api/health" && echo
-curl -fsS "https://$PUBLIC_HOST/analytics/health" && echo
+public_ok=1
+for path in /api/health /analytics/health; do
+  if curl -fsS --max-time 15 "https://$PUBLIC_HOST$path"; then
+    echo
+  else
+    public_ok=0
+    echo "FAILED: https://$PUBLIC_HOST$path"
+  fi
+done
 
-say "Done - open https://$PUBLIC_HOST"
+if [ "$public_ok" = "1" ]; then
+  say "Done - open https://$PUBLIC_HOST"
+else
+  say "The stack is up, but it is not reachable at https://$PUBLIC_HOST"
+  echo "The containers above are what Docker thinks; the failure is in front of them."
+  echo "  - does $PUBLIC_HOST resolve to this server?      dig +short $PUBLIC_HOST"
+  echo "  - is Traefik on the same network?                docker network inspect $NETWORK"
+  echo "  - has the certificate been issued yet?           docker logs <traefik> | tail"
+  echo "  - is the app itself healthy inside Docker?       make health"
+  exit 1
+fi

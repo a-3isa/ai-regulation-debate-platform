@@ -4,6 +4,18 @@ Type a topic, pick a number of rounds, and watch four AI personas debate it —
 with the Week 4 analytics updating after every round, and the full set of Week 4
 deliverables when the debate ends.
 
+**Live: <https://srv1982020.hstgr.cloud>** — nothing to install, no key needed
+to look around. Check it is up before you open it:
+
+```bash
+curl https://srv1982020.hstgr.cloud/api/health
+# {"status":"ok","analytics_reachable":true,"active_runs":0,...}
+```
+
+A debate takes a few minutes of real model calls, so the fastest way to see the
+whole product is to open a finished one from the history table rather than
+starting a new one and waiting.
+
 This repository is the **product layer** over the four course repositories. It
 contains no copy of their code: every service clones its week from GitHub at a
 ref pinned in `.env`, so nothing here can silently drift from the original
@@ -86,6 +98,25 @@ The plain compose command still works too:
 ```bash
 DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 ```
+
+### Running one piece at a time
+
+`make up-local` is the supported path, and the table below is what a reviewer
+needs when only one piece is being worked on.
+
+| Piece | Command |
+| --- | --- |
+| Everything | `make up-local`, then <http://localhost:5173> |
+| The frontend, against a running backend | `cd frontend && npm install && VITE_API_BASE=http://localhost:8100 npm run dev` |
+| The backend alone | `docker compose -f docker-compose.yml -f docker-compose.local.yml up --build debate analytics` |
+| The tests | `make test` |
+| Health of everything running | `make health` |
+
+The backend is not run outside a container on purpose: it imports the Week 3
+tree, which the image clones to `/week3` at a pinned commit. Running it from a
+checkout means reproducing that by hand, and then the thing being tested is no
+longer the thing that gets deployed. The tests below need no container for
+exactly this reason.
 
 ### One command, every week
 
@@ -170,6 +201,16 @@ change here is a measurement rather than an impression.
 
 ## Deploying behind Traefik
 
+The running deployment is <https://srv1982020.hstgr.cloud> — a Hostinger VPS
+with Traefik in front of it, terminating TLS and routing by path:
+
+| URL | Service |
+| --- | --- |
+| <https://srv1982020.hstgr.cloud/> | the UI |
+| <https://srv1982020.hstgr.cloud/api/health> | debate API (Week 3) |
+| <https://srv1982020.hstgr.cloud/analytics/health> | analytics API (Week 4) |
+| <https://srv1982020.hstgr.cloud/knowledge/> | retrieval API (Week 1) |
+
 `docker-compose.yml` carries labels for an existing Traefik instance with the
 Docker provider and an ACME resolver:
 
@@ -183,8 +224,17 @@ https://$PUBLIC_HOST/knowledge/  → Week 1 retrieval service
 The quickest path on a server that already runs Traefik:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/a-3isa/ai-regulation-debate-platform/main/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Abdo0213/week05_production_app/main/deploy.sh | bash
 # fills in .env from the example on the first run, then re-run it
+```
+
+The script clones the same repository it is fetched from above, which is the
+deployment repository. `github.com/a-3isa/ai-regulation-debate-platform` is a
+mirror of it — the two are kept at the same commit, and pushing to only one is
+how they stop being. To deploy from a different checkout, set `REPO`:
+
+```bash
+REPO=https://github.com/a-3isa/ai-regulation-debate-platform.git ./deploy.sh
 ```
 
 `deploy.sh` clones or updates the checkout, creates the Docker network,
@@ -214,6 +264,7 @@ image rebuild, not just a restart.
 | `WEEK1_RETRIEVAL_URL`, `WEEK1_API_KEY` | Week 1 knowledge base used for initial opinions and mid-debate evidence. |
 | `WEEK1_DATABASE_URL`, `OPENAI_API_KEY` | The pgvector database holding the embedded corpus, and the embedding model it was built with. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Credentials for the bundled `db` service. Change them for anything public. |
+| `LOG_LEVEL` | Threshold for the application log. `INFO` by default — see **Health and logs**. |
 | `DEBATE_MAX_ROUNDS`, `DEBATE_MAX_CONCURRENT_RUNS` | Bound how much LLM credit one request, or one impatient user, can spend. |
 | `SENTIMENT_BACKEND` | `vader` (small, deterministic) or `transformer` (better, ~2.5 GB). |
 | `PUBLIC_HOST`, `PUBLIC_ORIGIN`, `VITE_API_BASE` | Routing and CORS. |
@@ -278,6 +329,144 @@ latency work above is measured rather than asserted.
 
 Because `/runs/{id}/stream` replays from event 0, a browser that joins late or
 reconnects still renders the entire debate.
+
+## Health and logs
+
+Every service answers a health check, and `make health` asks all of them at once:
+
+```bash
+make health
+# debate    {"status":"ok","analytics_reachable":true,"active_runs":0,...}
+# analytics {"status":"ok",...}
+
+curl http://localhost:8100/health          # local overlay
+curl https://$PUBLIC_HOST/api/health       # deployed, behind Traefik
+```
+
+`/health` is deliberately cheap — it reports liveness, whether the Week 4
+service answers, how many debates are running, and the latency-relevant
+configuration, so a deployment can be checked without shelling into a
+container. It never runs a debate. The same endpoint is each container's
+`HEALTHCHECK`, so `docker compose ps` shows `healthy` rather than only `up`.
+
+The debate service logs one timestamped line per request and per debate event,
+each carrying the run id:
+
+```bash
+make logs                                     # every service, followed
+docker compose logs debate                    # one service
+docker compose logs debate | grep run_id=abc123   # one debate, end to end
+docker compose logs debate | grep ERROR           # only what went wrong
+```
+
+```text
+2026-09-21 10:15:30 INFO  application_started version=1.0.0 analytics_url=http://analytics:8000 max_rounds=8 ...
+2026-09-21 10:15:32 INFO  discussion_created run_id=abc123 rounds=5 strategy=ring agents=all topic="Should the AI Act ..."
+2026-09-21 10:15:32 INFO  request method=POST path=/runs status=202 run_id=- duration_ms=4
+2026-09-21 10:16:03 INFO  analytics_requested run_id=abc123 round=2
+2026-09-21 10:16:07 ERROR analytics_failed run_id=abc123 reason="analytics service unreachable: ..."
+2026-09-21 10:18:11 INFO  discussion_completed run_id=abc123 status=completed discussion_id=disc-7f2 events=94
+```
+
+Logged events: `application_started`, `runs_restored`, `run_interrupted`,
+`request` / `request_failed`, `discussion_created`, `discussion_retrieved`,
+`discussion_cancel_requested`, `discussion_completed`, `discussion_failed`,
+`stream_opened`, `analytics_requested`, `analytics_rejected`,
+`analytics_failed`, `report_requested`, `report_failed`, `charts_requested`,
+`member_created`, `member_updated`, `member_deleted`, `members_reset`, and the
+persistence failures `run_not_persisted`, `run_not_flushed`,
+`run_restore_failed`. Anything that went wrong is at `ERROR` or `WARNING`, so
+`grep ERROR` is the whole triage story. `LOG_LEVEL` sets the threshold
+(`INFO` by default; `DEBUG` adds the libraries' own chatter). uvicorn's access
+log is switched off on purpose — the `request` line above replaces it and has
+more in it.
+
+## Tests
+
+```bash
+make test                            # or: python -m pytest services/debate/tests -q
+```
+
+These need no containers, no Week 3 checkout, no API key and no network. That
+is possible because `services/debate/tests/week3_stub/` supplies exactly the
+names `app.runner` imports from Week 3 and nothing else, and because every test
+that starts a debate patches `run_debate` and the analytics client. So what is
+under test is the layer this repository owns — routing, status codes,
+persistence, response shapes, the log line each request produces — and not
+Week 3's engine or Week 4's metrics, which are tested in their own repositories.
+
+Covered: `/health` answers 200 and degrades honestly when Week 4 is
+unreachable; a run can be started, listed, retrieved, streamed and cancelled; a
+retrieved discussion carries three rounds attributed to their agents; the
+report and charts come back from Week 4; an unknown run is 404 on every route
+and an unfinished one is 409; a failed engine leaves a `failed` run carrying
+its reason; a persisted run is restored after a restart; and a sample request
+leaves a findable log line.
+
+What they do not cover, and what to run instead:
+
+| Not covered by `make test` | How to check it |
+| --- | --- |
+| The image builds | `make build` |
+| The container starts and the UI is reachable | `make up-local`, then open <http://localhost:5173> |
+| The deployed instance is healthy | `curl https://$PUBLIC_HOST/api/health` |
+| A real debate end to end | `make up-local` with `OPENROUTER_API_KEY` set, then start a debate in the UI |
+
+## Troubleshooting
+
+**The UI loads but every request fails, or the console shows a CORS error.**
+The bundle is calling the wrong API. `VITE_API_BASE` is compiled into the
+bundle by Vite at *build* time, so changing it needs `make build` (or
+`docker compose up --build`), not a restart. On a server, `DEBATE_CORS_ORIGINS`
+must also contain the origin the browser is actually using — it defaults to
+`PUBLIC_ORIGIN`.
+
+**`docker build` fails on the clone with `Authentication failed` or
+`repository not found`.** The four week repositories are private. Export a
+token with `repo:read` as `GIT_TOKEN` before building. If the token is set and
+it still fails, the build is running on the legacy builder:
+`--mount=type=secret` is a BuildKit feature, so set `DOCKER_BUILDKIT=1` (the
+Makefile and both scripts already do).
+
+**A build succeeds but the code is stale.** Docker cached the clone layer.
+`make pull` re-clones every week at its pinned ref, ignoring the cache, and
+`make refs` prints the commit each running container was actually built from.
+
+**Port already in use on `make up-local`.** The overlay publishes 5173, 8100,
+8000, 8200 and 5432. Stop whatever holds the port, or drop the overlay and run
+behind Traefik.
+
+**Every agent says the same bland thing, and the UI says the model is
+stubbed.** There is no `OPENROUTER_API_KEY`, or `AGENT_LLM_STUB=1`. A wrong
+`OPENROUTER_MODEL` slug looks identical from the outside: the provider answers
+400 on every turn. Check the slug at <https://openrouter.ai/models>, and check
+`llm_model` in `/health`.
+
+**The dashboard says analytics are unavailable.** Either Week 4 rejected an
+early round as not yet analysable — legitimate, and the debate continues — or
+the service is down. `/health` reports `analytics_reachable`, and
+`docker compose logs debate | grep analytics_` says which of the two it was.
+
+**Retrieval fails with `different vector dimensions`.** `WEEK1_EMBEDDING_MODEL`
+and `WEEK1_EMBEDDING_DIMENSIONS` must match the corpus in the database, not the
+Week 1 example config — see **Serving Week 1 from this stack**.
+
+**A debate is stuck with someone "on the floor" and nothing arriving.** The
+service restarted mid-debate. On startup, an unfinished run is marked
+`interrupted` with a reason and everything said up to that point is preserved;
+reload the page to see the closed session. `grep run_interrupted` in the log
+confirms it.
+
+**`docker compose ps` is healthy but `https://$PUBLIC_HOST` is not.** The
+failure is in front of the containers, not in them. `deploy.sh` prints the four
+things to check when its final health check fails: whether `PUBLIC_HOST`
+resolves to this server, whether Traefik is attached to `$TRAEFIK_NETWORK`,
+whether the certificate has been issued yet, and whether the app is healthy
+inside Docker (`make health`). A certificate that is still being issued looks
+exactly like a broken deploy for the first minute or so.
+
+**A deploy dropped debates.** The records live in the `runs` volume. `make
+down` keeps every volume; only `make clean` deletes them, and it asks first.
 
 ## Design notes
 
