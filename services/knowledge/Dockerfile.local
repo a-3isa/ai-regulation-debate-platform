@@ -23,6 +23,10 @@ COPY vendor/week1 /week1
 # (beautifulsoup4, lxml, trafilatura, tiktoken, ddgs) is never imported here.
 RUN pip install --no-cache-dir -r /week1/api/requirements.txt "gunicorn>=22.0"
 
+# The uploaded tree carries no .git, so record where it came from the way the
+# cloning variant does - `make refs` and deploy.sh both read this file.
+RUN test -f /SOURCE_REFS || echo 'week1 (uploaded source, not a clone)' > /SOURCE_REFS
+
 WORKDIR /week1
 
 RUN useradd --create-home --uid 10003 knowledge && chown -R knowledge:knowledge /week1

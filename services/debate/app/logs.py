@@ -113,6 +113,19 @@ def configure(level: str | None = None) -> None:
     root.setLevel(numeric)
     logger.setLevel(numeric)
 
+    # Week 3 configures logging of its own the moment it is imported, and one of
+    # the handlers it adds to the root logger writes to the console. Two console
+    # handlers print every line twice, in two different formats, which is how
+    # the deployed log looked until this ran. Its file handlers stay - they are
+    # Week 3's own record of a discussion, not a copy of this service's stdout -
+    # and so does anything writing somewhere else, such as pytest's capture.
+    for other in list(root.handlers):
+        if other is not handler and getattr(other, "stream", None) in (
+            sys.stdout,
+            sys.stderr,
+        ):
+            root.removeHandler(other)
+
     # uvicorn installs its own handlers with its own format. Route its startup
     # and error lines through ours, and drop its access log: the request
     # middleware logs every request with the run id and the duration in it.

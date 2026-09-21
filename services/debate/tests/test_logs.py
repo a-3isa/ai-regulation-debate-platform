@@ -91,3 +91,39 @@ def test_the_formatted_record_carries_a_timestamp_and_a_level(caplog):
     assert formatted.endswith("INFO  discussion_created run_id=abc123")
     # 2026-09-21 10:15:32
     assert len(formatted.split(" INFO")[0]) == 19
+
+
+def test_a_foreign_console_handler_is_dropped_so_no_line_prints_twice():
+    """Week 3 configures logging when it is imported, and adds a console
+    handler of its own to the root logger. Two console handlers print every
+    line twice, in two different formats."""
+    root = logging.getLogger()
+    foreign = logging.StreamHandler(sys.stdout)
+    foreign.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    root.addHandler(foreign)
+    try:
+        logs.configure()
+        consoles = [
+            h
+            for h in root.handlers
+            if getattr(h, "stream", None) in (sys.stdout, sys.stderr)
+        ]
+        assert len(consoles) == 1
+        assert getattr(consoles[0], "_debate_handler", False)
+    finally:
+        root.removeHandler(foreign)
+
+
+def test_a_foreign_file_handler_is_left_alone(tmp_path):
+    """Week 3 writes its own log files. They are its record of a discussion,
+    not a duplicate of this service's stdout, so they stay."""
+    root = logging.getLogger()
+    log_file = tmp_path / "week3.log"
+    foreign = logging.FileHandler(log_file)
+    root.addHandler(foreign)
+    try:
+        logs.configure()
+        assert foreign in root.handlers
+    finally:
+        root.removeHandler(foreign)
+        foreign.close()

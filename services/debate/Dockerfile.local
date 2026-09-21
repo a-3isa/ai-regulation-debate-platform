@@ -30,6 +30,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/debate/app ./app
 
+# The uploaded tree carries no .git, so record where it came from the way the
+# cloning variant does - `make refs` and deploy.sh both read this file, and a
+# service that cannot say what it was built from is the one you end up guessing
+# about at 2am.
+RUN { echo 'week3 (uploaded source, not a clone)'; echo 'week2: vendored inside week3'; } > /SOURCE_REFS
+
 # Agent memory is written under /week3/src/vendor/data, and finished runs under
 # /data/discussions; both must be writable by the non-root user.
 # /data/runs holds every debate's event log (restored after a restart), and
