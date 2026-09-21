@@ -12,3 +12,6 @@ stream*.txt
 # dist/ is already ignored; these are the copies kept next to the repo root.
 fixture.json
 harness.js
+
+# Scratch dir for the off-container test run (conftest.pytest_configure).
+.pytest-debate/
