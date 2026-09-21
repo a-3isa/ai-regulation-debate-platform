@@ -91,6 +91,85 @@ Then open <http://localhost:5173>. The debate API is on `:8100`, the analytics
 API on `:8000`, the Week 1 retrieval service on `:8200`, and Postgres on
 `:5432`.
 
+### From nothing, step by step
+
+The machine needs Docker with Compose v2 - `docker compose version` has to
+answer - and a few GB of free disk for the four images. Node 18 or newer is
+needed only to run the frontend outside its container; nothing else is installed
+on the host, because every service builds into an image of its own.
+
+1. **Clone the repository.**
+
+   ```bash
+   git clone https://github.com/a-3isa/ai-regulation-debate-platform.git
+   cd ai-regulation-debate-platform
+   ```
+
+   `github.com/Abdo0213/week05_production_app` is the same tree at the same
+   commit, and is the repository the server deploys from. Pushing to only one of
+   the two is how they stop being the same.
+
+2. **Create `.env` from the example.**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   For a local run, three settings are load-bearing: `OPENROUTER_API_KEY`
+   (empty means deterministic stub turns, and the UI says so), and
+   `WEEK1_RETRIEVAL_URL` with `WEEK1_API_KEY`, which are the retrieval used for
+   opening positions and mid-debate evidence. `PUBLIC_HOST`, `PUBLIC_ORIGIN`
+   and `VITE_API_BASE` belong to the Traefik path: `docker-compose.local.yml`
+   publishes ports directly and builds the UI against `http://localhost:8100`
+   whatever `.env` says.
+
+3. **Export a GitHub token.** The four week repositories are private, so the
+   builds clone them with a token passed to BuildKit as a secret:
+
+   ```bash
+   export GIT_TOKEN=ghp_...          # PowerShell: $env:GIT_TOKEN = "ghp_..."
+   ```
+
+   Without read access to those repositories the images cannot build at all. If
+   you have the week sources on disk rather than access to their remotes, build
+   from them with the `Dockerfile.local` variants instead - see **Deploying to a
+   host that holds no GitHub token**.
+
+4. **Build and start everything.**
+
+   ```bash
+   make up-local                     # ./scripts/stack.sh up-local
+                                     # .\scripts\stack.ps1 up-local   (Windows)
+   ```
+
+   The first run clones four repositories and installs their dependencies, so it
+   takes a while; later runs reuse the cache.
+
+5. **Check what came up.**
+
+   ```bash
+   make ps
+   make health
+   curl http://localhost:8100/health
+   ```
+
+   Every service except the UI declares a `HEALTHCHECK`, so `debate`,
+   `analytics` and `knowledge` should read `healthy` rather than only `up`, and
+   `/health` should report `analytics_reachable: true`. `make refs` prints the
+   commit each container was actually built from.
+
+6. **Open <http://localhost:5173>**, type a topic, pick a round count and a
+   topology, and start a debate. A real debate is one model call per agent per
+   round, so it takes minutes - opening a finished one from the history table is
+   the faster way to see the whole product. See **Latency**.
+
+7. **Stop it.** `make down` stops the stack and keeps every volume, so debates,
+   edited members and the corpus survive. `make clean` is the one that deletes
+   them, and it asks first.
+
+The tests need none of the above: `make test` runs against a stub of the Week 3
+tree, with no containers, no token and no network.
+
 Without `make`, `scripts/stack.sh` and `scripts/stack.ps1` take the same verbs
 (`up`, `up-local`, `build`, `pull`, `down`, `logs`, `ps`, `refs`, `health`).
 The plain compose command still works too:
@@ -250,6 +329,76 @@ curl https://$PUBLIC_HOST/api/health
 `VITE_API_BASE` is compiled into the UI bundle by Vite, so changing it needs an
 image rebuild, not just a restart.
 
+## Deploying to a host that holds no GitHub token
+
+`deploy.sh` clones the four week repositories **on the server**, which means the
+server needs a credential that can read them, sitting on the box for every
+future build. The live deployment does not do that: it builds from sources
+uploaded to the host, so no GitHub credential ever reaches it. What lives there:
+
+| On the host | What it is |
+| --- | --- |
+| `/docker/ai-debate/app` | this repository's tracked files |
+| `/docker/ai-debate/app/.env` | that host's own configuration and keys, never uploaded |
+| `/docker/ai-debate/app/docker-compose.override.yml` | a copy of `compose-override.server.yml` |
+| `/docker/ai-debate/app/vendor/week1`, `vendor/week3`, `vendor/week4` | the week sources, uploaded once |
+
+`compose-override.server.yml` points the three builds at
+`services/*/Dockerfile.local`, which copy `vendor/<week>` instead of cloning it,
+and keeps the bundled `db` out of the default set because that host's corpus
+already lives in a database of its own. Compose picks
+`docker-compose.override.yml` up automatically, so every command on the host is
+the ordinary one - no extra `-f`.
+
+A deploy is then three steps and a check. `git archive` is what makes the first
+one safe: it writes exactly the committed tree, so the host's `.env`, its
+override file and `vendor/` cannot be clobbered by a stray local file, and an
+uncommitted experiment cannot reach production.
+
+```bash
+# 1. package the commit you intend to run
+git archive --format=tar.gz -o /tmp/app-$(git rev-parse --short HEAD).tar.gz HEAD
+
+# 2. upload it, unpack it in /tmp, and copy it over the checkout
+scp /tmp/app-*.tar.gz root@<server>:/tmp/app.tar.gz
+ssh root@<server> 'mkdir -p /tmp/stage && tar -xzf /tmp/app.tar.gz -C /tmp/stage && cp -r /tmp/stage/. /docker/ai-debate/app/'
+
+# 3. rebuild only the services whose source changed, and recreate only those
+ssh root@<server> 'cd /docker/ai-debate/app && DOCKER_BUILDKIT=1 docker compose build debate && docker compose up -d debate'
+
+# 4. verify from outside, where the users are
+curl -fsS https://$PUBLIC_HOST/api/health
+curl -fsS https://$PUBLIC_HOST/analytics/health
+```
+
+**Check `active_runs` before step 3.** Recreating the `debate` container ends any
+debate it is running: the run is restored as `interrupted` afterwards, but the
+debate itself cannot resume. `/api/health` reports the count, which is exactly
+what `deploy.sh` polls before it touches a running stack (`FORCE=1` skips the
+wait). Rebuilding the one service that changed also leaves the others up -
+there is no reason for a logging fix in the debate service to restart Week 4.
+
+Afterwards, ask the containers what they are running:
+
+```bash
+ssh root@<server> 'cd /docker/ai-debate/app && docker compose exec -T debate cat /SOURCE_REFS'
+# week3 (uploaded source, not a clone)
+# week2: vendored inside week3
+```
+
+That is as specific as this host can be. An uploaded tree carries no `.git`, so
+the `Dockerfile.local` variants write that fallback line rather than a commit,
+and `make refs` on the deployment host answers with it. Before the fallback
+existed the file was simply missing and the command answered `No such file` -
+worse, because a missing file reads as a broken image rather than a known
+limitation. Naming the real commit would mean stamping it into the tree before
+upload; until then, what is running is whatever the last `git archive` packaged.
+
+The helper that drives all of this on the operator's machine (an SSH wrapper
+that keeps the host, the user and the password out of the command line) lives
+outside this repository on purpose: it is one operator's credentials, not part
+of the product.
+
 ## Configuration
 
 | Variable | Purpose |
@@ -381,6 +530,19 @@ persistence failures `run_not_persisted`, `run_not_flushed`,
 log is switched off on purpose — the `request` line above replaces it and has
 more in it.
 
+**One line per event, once.** Week 3 configures logging as it is imported, and
+one of the handlers it adds to the root logger writes to the console. With two
+console handlers on the root logger every line appeared twice, in two different
+formats, which is how the deployed log read until `logs.configure()` started
+dropping root handlers that write to `stdout` or `stderr` and are not its own.
+Week 3's file handlers stay: they are its own record of a discussion under
+`/week3/outputs/logs`, not a copy of this service's stdout - and so does
+anything writing somewhere else, such as pytest's capture handler, which is why
+the check is on the handler's stream and not on its class. One Week 3 line still
+arrives unformatted at each boot (`logging initialised - session=...`): it is
+emitted while Week 3 is being imported, before `logs.configure()` runs, and
+silencing it would mean configuring logging before importing the Week 3 tree.
+
 ## Tests
 
 ```bash
@@ -467,6 +629,59 @@ exactly like a broken deploy for the first minute or so.
 
 **A deploy dropped debates.** The records live in the `runs` volume. `make
 down` keeps every volume; only `make clean` deletes them, and it asks first.
+
+## This week, commit by commit
+
+What the week produced, in the order it happened. Every entry is a commit in this
+repository; `git show <sha>` is the detail this table leaves out.
+
+| Commit | What it did |
+| --- | --- |
+| `d96c49c` | The live platform over the four course repositories: the debate service, the SSE stream, the analytics call, the first UI |
+| `91189af` | A self-hosted Week 1 retrieval service, and `deploy.sh` as the one command that deploys the stack |
+| `c28e5d9` | A stray file removed - the one a shell-quoting mistake created |
+| `6247dd5` | The council-chamber UI, real interaction-graph weights, Week 1 served from this stack |
+| `7b2d5e8` | Member management, runs persisted so debates survive a restart, plain-language UI copy |
+| `5259365` | The redesign, the live opinion chart, one command for every week, faster debates |
+| `9ae6d97` | The uploaded-source build path, for a host that should hold no GitHub token |
+| `e63c45f` | Council cards laid out for real member names rather than placeholder ids |
+| `f3b75a8` | The dashboard rebuilt on the Forum design system |
+| `979d29e` | One timestamped line per request and per debate event, each carrying the run id |
+| `87d7d8f` | The API contract covered by tests that need no container, against a Week 3 stub |
+| `c66c45d` | The documentation: the live URL, how to run each piece, what to do when it breaks |
+| `21c37a4` | Logging fixed so no line prints twice, and a recorded source ref for the uploaded builds |
+
+### How the live instance got to that commit
+
+The deployment was two rounds of the upload path above, and the second round
+exists because of what the first one revealed.
+
+1. **`c66c45d` shipped.** The server was running `f3b75a8`, two days behind: the
+   logging, the tests and the docs were committed and pushed but never deployed.
+   `make test` first (44 passing), then `git archive HEAD`, upload, unpack in
+   `/tmp`, copy over `/docker/ai-debate/app`, rebuild `debate` alone - the diff
+   touched only that service, the frontend not at all - and recreate it.
+   `/api/health`, `/analytics/health` and the UI all answered; `active_runs` was
+   `0` throughout, so no debate was cut off.
+
+2. **The new log showed the bug.** Every line appeared twice, in two formats -
+   visible only once the service was running in the image, because the duplicate
+   comes from Week 3's own logging setup, which the tests stub out. Root cause
+   came from asking the running container what handlers it had: two
+   `RotatingFileHandler`s and two `StreamHandler`s on the root logger, one of
+   them Week 3's. The same check found `/SOURCE_REFS` missing on this host.
+
+3. **`21c37a4` fixed both**, with two tests written first - a foreign console
+   handler is dropped, a foreign file handler is kept - then `debate` and
+   `knowledge` rebuilt and recreated, and the log re-read to confirm one line per
+   event and a ref that answers. `analytics` and `ui` were left running.
+
+4. **Both remotes pushed** to `21c37a4`, so the deployment repository, its mirror
+   and the running server agree. That order - deploy, then push - is backwards
+   from the habit, and worth naming: the fix was verified against the real image
+   before it was published, but until the push the server was ahead of both
+   repositories - and on this host no image could have said so, which is the
+   limitation the fallback ref line at least names out loud.
 
 ## Design notes
 
