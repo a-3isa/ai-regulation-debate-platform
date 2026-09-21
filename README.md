@@ -704,6 +704,27 @@ discussion before computing anything; an early round may not satisfy it. That
 arrives as an `analytics_unavailable` event with the reason, and the debate
 continues — a metrics gap never kills a run.
 
+**A missing `STANCE:` line used to cost the whole report.** An agent declares
+its stance on a `STANCE:` line, and a model that omits it leaves Week 3 recording
+the snapshot with `stance_score: null` - honestly, because Week 3 refuses to
+guess. Week 4 then validates before it computes anything and fails the *entire*
+discussion on that one null (`missing_stance`), so a debate that ran perfectly
+ended with no metrics and no report. Three of the ten finished runs on the
+deployment were rejected for exactly that. The round boundary now backfills:
+Week 3's own `score_opinion_stance()` reads the opinion the agent actually wrote,
+and only if that cannot answer either does the previous stance carry forward.
+What was measured and what was filled in is recorded on `config.stance_backfill`
+and said in a notice.
+
+The order matters more than the filling. Week 4 checks the same numbers twice -
+`missing_stance` on the snapshots, and `stance_delta_mismatch` on
+`interactions[...]`, where a delta of `None` between two real stances fails on
+its own. `record_interactions` computes that delta from whatever the snapshots
+hold when it runs, so the backfill has to happen first. Replaying a rejected run
+showed both halves: filling the stance alone still answered 422, and the same
+discussion came back 200 with a 6277-character report only once the deltas
+agreed.
+
 **A debate runs in a worker thread.** Week 3's turn logic is synchronous and
 network-bound. One thread per active run, capped by
 `DEBATE_MAX_CONCURRENT_RUNS`.

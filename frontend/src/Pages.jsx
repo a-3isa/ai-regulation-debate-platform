@@ -512,6 +512,13 @@ function AgentLegend({ agents, personas }) {
 export function RecordPage({ run, charts }) {
   const finished = ['completed', 'converged', 'cancelled'].includes(run.status);
 
+  // The notice the debate service emits when Week 4 declines to write the
+  // report - the last one, because a run that was retried carries more than one.
+  const reportProblem = useMemo(
+    () => [...(run.notices || [])].reverse().find((notice) => /report unavailable/i.test(notice)),
+    [run.notices]
+  );
+
   const hrefs = useMemo(() => {
     if (!finished) return {};
     const out = {};
@@ -567,7 +574,25 @@ export function RecordPage({ run, charts }) {
             <ReactMarkdown>{run.report}</ReactMarkdown>
           </div>
         ) : (
-          <Empty label="Report unavailable." />
+          // A report can be genuinely unavailable for a debate that ran fine:
+          // Week 4 validates a discussion before it computes anything, and
+          // rejects the whole thing if one round is missing a stance. The reason
+          // is already on the run as a notice, so print it here rather than
+          // sending the reader to the container logs for something this page
+          // was told.
+          <>
+            <Empty label="No report was produced for this debate." />
+            {reportProblem ? (
+              <p className="muted" style={{ margin: 'var(--s-3) 0 0' }}>
+                Week 4 answered: {reportProblem.replace(/^final report unavailable:\s*/i, '')}
+              </p>
+            ) : (
+              <p className="muted" style={{ margin: 'var(--s-3) 0 0' }}>
+                The run carries no reason for it. `docker compose logs debate | grep report_`
+                has the request that was made.
+              </p>
+            )}
+          </>
         )}
       </section>
 

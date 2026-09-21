@@ -422,6 +422,104 @@ def _ensure_baseline_stances(state: dict, emit: Emit) -> None:
     )
 
 
+def _ensure_round_stances(
+    state: dict, round_number: int, proposition: str, emit: Emit
+) -> None:
+    """Leave no agent without a number for this round, and say how it got one.
+
+    An agent declares its stance on a `STANCE:` line, which Week 3 parses into
+    the snapshot. A model that omits the line leaves `stance_score` null - Week 3
+    records the gap honestly rather than inventing a number, which is right for
+    its own record and fatal for the product: Week 4 validates before it computes
+    anything, so one null answers `missing_stance` for the whole discussion and
+    the debate ends with no metrics and no report. Three of the ten finished runs
+    on the deployment were rejected for exactly that.
+
+    So the gap is filled here, in order of how much it is worth trusting:
+
+    1. `score_opinion_stance()` - Week 3's own scorer, reading the opinion the
+       agent actually wrote. It is a scoring call, not a generation call: nothing
+       is invented, and it is the same call the round-0 baseline already uses.
+    2. The agent's previous stance, carried forward. It says "this agent did not
+       move", which is the conservative reading of a turn that argued without
+       restating a number.
+    3. `NEUTRAL_PLACEHOLDER`, when there is no earlier number at all.
+
+    Only 1 is a measurement. What each agent got is recorded on
+    `config.stance_backfill`, which travels with the persisted record, and named
+    in a `notice` the UI shows - the same contract `_ensure_baseline_stances`
+    keeps for round 0.
+
+    One network call per missing stance, and only when one is missing: a run
+    where every agent declares its stance makes none.
+    """
+    stage = f"round_{round_number}"
+    backfilled: list[dict] = []
+
+    for persona_id in state.get("agents", []):
+        snapshots = state["opinions"].get(persona_id) or []
+        index = next(
+            (i for i in range(len(snapshots) - 1, -1, -1) if snapshots[i].stage == stage),
+            None,
+        )
+        if index is None or snapshots[index].stance_score is not None:
+            continue
+
+        snapshot = snapshots[index]
+        scored = None
+        if proposition and snapshot.opinion_text:
+            try:
+                scored = score_opinion_stance(snapshot.opinion_text, proposition)
+            except Exception:  # noqa: BLE001 - a scoring failure must not kill a round
+                scored = None
+
+        if scored is not None:
+            snapshot.stance_score = scored
+            source = "scored"
+        else:
+            previous = next(
+                (
+                    earlier.stance_score
+                    for earlier in reversed(snapshots[:index])
+                    if earlier.stance_score is not None
+                ),
+                None,
+            )
+            snapshot.stance_score = (
+                previous if previous is not None else NEUTRAL_PLACEHOLDER
+            )
+            source = "carried_forward" if previous is not None else "neutral_placeholder"
+
+        backfilled.append(
+            {"agent": persona_id, "round": round_number, "source": source}
+        )
+
+    if not backfilled:
+        return
+
+    state.setdefault("config", {}).setdefault("stance_backfill", []).extend(backfilled)
+    scored_agents = [b["agent"] for b in backfilled if b["source"] == "scored"]
+    filled_agents = [b["agent"] for b in backfilled if b["source"] != "scored"]
+    parts = []
+    if scored_agents:
+        parts.append(
+            f"scored from the opinion text for {', '.join(scored_agents)}"
+        )
+    if filled_agents:
+        parts.append(f"carried forward for {', '.join(filled_agents)}")
+    emit(
+        "notice",
+        {
+            "message": (
+                f"Round {round_number}: no STANCE line was declared by "
+                f"{len(backfilled)} agent(s), so the stance was "
+                f"{'; '.join(parts)}. Week 4 rejects a discussion that is missing "
+                f"any stance, so the figures for that round rest on this."
+            )
+        },
+    )
+
+
 def _emit_retrieval(event, emit: Emit) -> None:
     emit(
         "retrieval",
@@ -712,6 +810,10 @@ def run_debate(
             _run_round_in_order(state, agents, round_number, emit, cancelled)
 
         record_round_opinions(state, round_number)
+        # Before anything reads the round: a null stance here fails Week 4's
+        # validation for the entire discussion, so the gap is closed while the
+        # opinion that should have carried a number is still in hand.
+        _ensure_round_stances(state, round_number, proposition, emit)
         record_interactions(state, round_number)
 
         for persona_id in agents:
