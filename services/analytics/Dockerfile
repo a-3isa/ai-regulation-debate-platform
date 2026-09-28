@@ -23,7 +23,7 @@ FROM python:3.12-slim
 
 ARG WEEK4_REPO=https://github.com/YaassminSalahEldin/Analytics-Intelligence-Layer.git
 ARG WEEK4_BRANCH=week5/production-followups
-ARG WEEK4_REF=bfbdb451d4043ad5f0c1a0c02012164ab5dc0e33
+ARG WEEK4_REF=845ed45d55fd790bfb5cbd6107e4af431994a57b
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -46,7 +46,7 @@ services:
       args:
         WEEK4_REPO: ${WEEK4_REPO:-https://github.com/YaassminSalahEldin/Analytics-Intelligence-Layer.git}
         WEEK4_BRANCH: ${WEEK4_BRANCH:-week5/production-followups}
-        WEEK4_REF: ${WEEK4_REF:-bfbdb451d4043ad5f0c1a0c02012164ab5dc0e33}
+        WEEK4_REF: ${WEEK4_REF:-845ed45d55fd790bfb5cbd6107e4af431994a57b}
     image: analytics-api:latest
     restart: unless-stopped
     environment:
